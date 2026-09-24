@@ -101,7 +101,7 @@ choose a display, window, or camera in the desktop pane. The pane shows:
 3. **Camera picker** — switch between connected cameras
 4. **Vision candidates** — model suggestions based on intake size
 5. **Pin button** — lock a specific vision model for the session
-6. **Inject picker** ("rides your turns") — when fresh readings are shared; see [Injection modes](#injection-modes)
+6. **Inject picker** ("Rides your turns") — when fresh readings are shared; see [Injection modes](#injection-modes)
 7. **Blink rate** — how often the watch checks for changes; on **manual** it also shows the **Snapshot** buttons at the right of the same line; see [Manual snapshots](#manual-snapshots)
 8. **Status** — live status of the capture engine, frame count, source info
 
@@ -110,7 +110,7 @@ giving the assistant a live view of your screen. How often is yours to decide:
 
 ### Injection modes
 
-Pick it live in the desktop pane — the **"rides your turns"** select, just above the
+Pick it live in the desktop pane — the **"Rides your turns"** select, just above the
 Blink-rate picker. The pick is stored in the plugin's state directory (`inject_mode`) and read on every
 turn, so it applies to the next turn in every session without a restart. Without a pane pick,
 `PV_VISION_INJECT_MODE` — set in the environment that runs the Hermes backend — supplies the
@@ -140,7 +140,7 @@ would save nothing.
 
 Set **"Blink rate"** to **manual** and the watch stops checking on its own — nothing is
 described until you snapshot — while a **Snapshot** pair appears at the right of that same
-line: one button with a camera icon (a camera frame) and one with a cropping-rectangle icon
+line: one button with a camera icon (a camera frame) and one with a screen-crop icon
 (a screenshot). Each button
 first pops the matching source list — cameras for the camera button; displays and application
 windows for the screen button — and picking a source opens a live view where you drag out the

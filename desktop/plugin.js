@@ -7,13 +7,13 @@
  * the picker always prompts and nothing is captured until the user picks a source
  * and confirms (no default, no auto-pick).
  *
- * A second picker ("rides your turns") chooses WHEN fresh readings are shared: picking
+ * A second picker ("Rides your turns") chooses WHEN fresh readings are shared: picking
  * one POSTs to the backend, which persists it where the agent half reads it on the next
  * turn — no restart. That pick outranks PV_VISION_INJECT_MODE, which outranks the
  * built-in default.
  *
  * When "Blink rate" is set to manual, the backend checks nothing on its own and a Snapshot
- * pair appears at the right of that row: a camera button and a crop button. Each pops the
+ * pair appears beside the picker: a camera button and a crop button. Each pops the
  * matching source list (cameras; displays and windows), opens a live view, and the drag
  * selection is saved to disk and staged into the chat INPUT through the app's own paste
  * route — a synthetic paste the composer cannot tell from ⌘V, so no desktop change and no
@@ -193,7 +193,7 @@ function WindowRow({ source, selected, onSelect, ctx }) {
 }
 
 // ---------------------------------------------------------------------------
-// Manual snapshots — the two buttons at the right of the "Blink rate" row when its
+// Manual snapshots — the two buttons beside the "Blink rate" picker when its
 // pick is "manual". One lists cameras, the other displays + application windows; picking a
 // source opens a live-view overlay whose drag selection becomes the still.
 // ---------------------------------------------------------------------------
@@ -290,6 +290,9 @@ function SnapMenu({ ctx, sources, kind, disabled, onPick }) {
     rows.push(jsx(DropdownMenuItem, { disabled: true, children: empty }, 'pv-snap-empty'))
   }
   return jsx(DropdownMenu, {
+    onOpenChange: open => {
+      if (open && sources?.refetch) sources.refetch()
+    },
     children: [
       jsx(Tip, {
         label: camera
@@ -303,7 +306,7 @@ function SnapMenu({ ctx, sources, kind, disabled, onPick }) {
             disabled,
             className: 'h-6 w-7 p-0',
             'aria-label': camera ? 'snapshot from a camera' : 'crop a screen area',
-            children: jsx(Codicon, { name: camera ? 'device-camera' : 'crop' })
+            children: jsx(Codicon, { name: camera ? 'device-camera' : 'screen-cut' })
           })
         })
       }),
@@ -756,7 +759,7 @@ function PeripheralVisionPane({ ctx }) {
         ? jsxs('div', {
             className: 'flex items-center gap-2 text-xs text-(--ui-text-tertiary)',
             children: [
-              jsx('span', { children: 'rides your turns' }),
+              jsx('span', { children: 'Rides your turns' }),
               jsx(Tip, {
                 label: `Sharing into turns — ${INJECT_HINT[injectMode] || INJECT_HINT.on_change} (${
                   INJECT_SOURCE[injectOrigin] || INJECT_SOURCE.default
@@ -805,7 +808,7 @@ function PeripheralVisionPane({ ctx }) {
           }),
           manualMode && snapshotsSupported
             ? jsxs('span', {
-                className: 'ml-auto flex items-center gap-2',
+                className: 'ml-3 flex items-center gap-2',
                 children: [
                   jsx('span', { children: 'Snapshot' }),
                   jsx(SnapMenu, { ctx, sources, kind: 'cameras', disabled: busy || snapBusy, onPick: openSnap }),
