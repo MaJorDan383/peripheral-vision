@@ -695,20 +695,9 @@ function PeripheralVisionPane({ ctx }) {
   return jsxs('div', {
     className: 'flex h-full flex-col gap-2 p-3 text-sm',
     children: [
-      jsxs('div', {
-        className: 'flex items-center justify-between gap-2',
-        children: [
-          jsx('div', {
-            className: 'font-medium',
-            children: 'Peripheral Vision'
-          }),
-          running
-            ? jsxs('span', {
-                className: 'text-xs text-(--ui-text-tertiary)',
-                children: ['watching ', data.source_label || 'a source']
-              })
-            : jsx('span', { className: 'text-xs text-(--ui-text-quaternary)', children: 'idle' })
-        ]
+      jsx('div', {
+        className: 'font-medium',
+        children: 'Peripheral Vision'
       }),
 
       jsxs('div', {
@@ -840,9 +829,16 @@ function PeripheralVisionPane({ ctx }) {
             ]
           }),
           data.source_label
-            ? jsx('span', {
-                className: 'font-medium text-(--ui-text-tertiary)',
-                children: data.source_label
+            ? jsxs('span', {
+                className: 'inline-flex items-center gap-1.5 text-(--ui-text-quaternary)',
+                children: [
+                  'Watching',
+                  jsx(Codicon, { name: 'eye' }),
+                  jsx('span', {
+                    className: 'font-medium text-(--ui-text-tertiary)',
+                    children: data.source_label
+                  })
+                ]
               })
             : jsx('span', {
                 className: 'text-(--ui-text-quaternary)',
