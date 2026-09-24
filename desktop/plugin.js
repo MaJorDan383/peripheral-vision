@@ -759,7 +759,7 @@ function PeripheralVisionPane({ ctx }) {
         ? jsxs('div', {
             className: 'flex items-center gap-2 text-xs text-(--ui-text-tertiary)',
             children: [
-              jsx('span', { children: 'Rides your turns' }),
+              jsx('span', { children: 'Rides your turns:' }),
               jsx(Tip, {
                 label: `Sharing into turns — ${INJECT_HINT[injectMode] || INJECT_HINT.on_change} (${
                   INJECT_SOURCE[injectOrigin] || INJECT_SOURCE.default
@@ -788,7 +788,7 @@ function PeripheralVisionPane({ ctx }) {
       jsxs('div', {
         className: 'flex items-center gap-2 text-xs text-(--ui-text-tertiary)',
         children: [
-          jsx('span', { children: 'Blink rate' }),
+          jsx('span', { children: 'Blink rate:' }),
           jsx(Tip, {
             label:
               'How often the watch looks for changes. Manual checks nothing on its own — you snapshot on demand instead.',
