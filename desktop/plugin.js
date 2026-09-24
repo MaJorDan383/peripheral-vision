@@ -12,8 +12,8 @@
  * turn — no restart. That pick outranks PV_VISION_INJECT_MODE, which outranks the
  * built-in default.
  *
- * When "check for changes" is set to manual, the backend checks nothing on its own and a
- * snapshot row appears: a camera button and a cropping-rectangle button. Each pops the
+ * When "Blink rate" is set to manual, the backend checks nothing on its own and a Snapshot
+ * pair appears at the right of that row: a camera button and a crop button. Each pops the
  * matching source list (cameras; displays and windows), opens a live view, and the drag
  * selection is saved to disk and staged into the chat INPUT through the app's own paste
  * route — a synthetic paste the composer cannot tell from ⌘V, so no desktop change and no
@@ -193,8 +193,8 @@ function WindowRow({ source, selected, onSelect, ctx }) {
 }
 
 // ---------------------------------------------------------------------------
-// Manual snapshots — the two buttons under "check for changes" when its pick is
-// "manual". One lists cameras, the other displays + application windows; picking a
+// Manual snapshots — the two buttons at the right of the "Blink rate" row when its
+// pick is "manual". One lists cameras, the other displays + application windows; picking a
 // source opens a live-view overlay whose drag selection becomes the still.
 // ---------------------------------------------------------------------------
 
@@ -331,7 +331,7 @@ function PeripheralVisionPane({ ctx }) {
   const queryClient = useQueryClient()
   const [pickerOpen, setPickerOpen] = useState(false)
   const [chosen, setChosen] = useState(null)
-  // The rhythm pick: optimistic while its POST is in flight; '0' is manual snapshots.
+  // The Blink-rate pick: optimistic while its POST is in flight; '0' is manual snapshots.
   const [intervalPick, setIntervalPick] = useState('')
   // '' = follow whatever is being watched (Displays while idle); a pick pins the
   // scope for the NEXT source choice, and starting a watch re-syncs it (see start()).
@@ -381,8 +381,8 @@ function PeripheralVisionPane({ ctx }) {
   const injectState = data.inject_mode || null
   const injectMode = injectPick || (injectState && injectState.mode) || 'on_change'
   const injectOrigin = injectPick ? 'pane' : (injectState && injectState.source) || 'default'
-  // The checking rhythm — pane pick > backend state > default; '0' = manual, which
-  // renders the snapshot row (only a backend that advertises `snap` can serve it).
+  // The blink rate — pane pick > backend state > default; '0' = manual, which puts the
+  // Snapshot pair on that row (only a backend that advertises `snap` can serve it).
   const intervalState = data.interval || null
   const intervalMs = intervalPick || (intervalState ? String(intervalState.ms) : '2000')
   const manualMode = intervalMs === '0'
@@ -752,41 +752,6 @@ function PeripheralVisionPane({ ctx }) {
         children: 'Nothing is captured until you pick a source in the picker — the mode picker decides which kind it lists.'
       }),
 
-      jsxs('div', {
-        className: 'flex items-center gap-2 text-xs text-(--ui-text-tertiary)',
-        children: [
-          jsx('span', { children: 'check for changes' }),
-          jsx(Tip, {
-            label:
-              'How often the watch looks for changes. Manual checks nothing on its own — you snapshot on demand instead.',
-            children: jsx(Select, {
-              value: intervalMs,
-              onValueChange: changeInterval,
-              children: jsxs(SelectTrigger, {
-                className: 'h-6 w-28 text-xs',
-                'aria-label': 'check for changes',
-                children: [jsx(SelectValue, {}), jsx(SelectContent, {
-                  children: (snapshotsSupported ? INTERVALS : INTERVALS.filter(option => option.value !== '0')).map(option =>
-                    jsx(SelectItem, { value: option.value, children: option.label }, option.value)
-                  )
-                })]
-              })
-            })
-          })
-        ]
-      }),
-
-      manualMode && snapshotsSupported
-        ? jsxs('div', {
-            className: 'flex items-center gap-2 text-xs text-(--ui-text-tertiary)',
-            children: [
-              jsx('span', { children: 'snapshot' }),
-              jsx(SnapMenu, { ctx, sources, kind: 'cameras', disabled: busy || snapBusy, onPick: openSnap }),
-              jsx(SnapMenu, { ctx, sources, kind: 'screens', disabled: busy || snapBusy, onPick: openSnap })
-            ]
-          })
-        : null,
-
       injectState
         ? jsxs('div', {
             className: 'flex items-center gap-2 text-xs text-(--ui-text-tertiary)',
@@ -816,6 +781,40 @@ function PeripheralVisionPane({ ctx }) {
             ]
           })
         : null,
+
+      jsxs('div', {
+        className: 'flex items-center gap-2 text-xs text-(--ui-text-tertiary)',
+        children: [
+          jsx('span', { children: 'Blink rate' }),
+          jsx(Tip, {
+            label:
+              'How often the watch looks for changes. Manual checks nothing on its own — you snapshot on demand instead.',
+            children: jsx(Select, {
+              value: intervalMs,
+              onValueChange: changeInterval,
+              children: jsxs(SelectTrigger, {
+                className: 'h-6 w-28 text-xs',
+                'aria-label': 'blink rate',
+                children: [jsx(SelectValue, {}), jsx(SelectContent, {
+                  children: (snapshotsSupported ? INTERVALS : INTERVALS.filter(option => option.value !== '0')).map(option =>
+                    jsx(SelectItem, { value: option.value, children: option.label }, option.value)
+                  )
+                })]
+              })
+            })
+          }),
+          manualMode && snapshotsSupported
+            ? jsxs('span', {
+                className: 'ml-auto flex items-center gap-2',
+                children: [
+                  jsx('span', { children: 'Snapshot' }),
+                  jsx(SnapMenu, { ctx, sources, kind: 'cameras', disabled: busy || snapBusy, onPick: openSnap }),
+                  jsx(SnapMenu, { ctx, sources, kind: 'screens', disabled: busy || snapBusy, onPick: openSnap })
+                ]
+              })
+            : null
+        ]
+      }),
 
       jsxs('div', {
         className:

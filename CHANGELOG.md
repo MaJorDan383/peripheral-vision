@@ -16,6 +16,9 @@ All notable changes to this plugin. Nothing before the first public release was 
   what the watch is looking at right now — display, window, or camera.
 
 ### Changed
+- **The pane's controls regrouped.** "check for changes" is now **Blink rate**; the
+  **"rides your turns"** picker sits above it; and while Blink rate is manual, the snapshot
+  buttons sit at the right of that same line, labelled **Snapshot**.
 - **Manual snapshots crop the full-resolution still.** A display or window snapshot session
   captures once, at the source's native resolution; every frame the overlay shows is that same
   capture replayed, so the saved crop is exactly the region you dragged, at full detail — and a

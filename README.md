@@ -11,7 +11,7 @@ Peripheral Vision is a Hermes plugin that keeps a live view of your screen, wind
   Hermes' own settings, otherwise to the model the live session is running
 - **Pre-LLM context injection** — adds live descriptions to a turn through the `pre_llm_call` hook, gated by the inject mode (picked in the pane, or `PV_VISION_INJECT_MODE`) so a screen that has not moved does not pay for itself on every turn
 - **Desktop pane** — shows a live preview with monitor/window/camera picker, vision model candidates, and pin support
-- **Manual snapshots** — set "check for changes" to manual and snapshot on demand: a camera frame, or a drag-cropped screenshot of a display or window, lands in the message input ready to send
+- **Manual snapshots** — set "Blink rate" to manual and snapshot on demand: a camera frame, or a drag-cropped screenshot of a display or window, lands in the message input ready to send
 
 ## Installation
 
@@ -102,7 +102,7 @@ choose a display, window, or camera in the desktop pane. The pane shows:
 4. **Vision candidates** — model suggestions based on intake size
 5. **Pin button** — lock a specific vision model for the session
 6. **Inject picker** ("rides your turns") — when fresh readings are shared; see [Injection modes](#injection-modes)
-7. **Snapshot row** (manual) — camera and drag-crop buttons, shown when "check for changes" is set to manual; see [Manual snapshots](#manual-snapshots)
+7. **Blink rate** — how often the watch checks for changes; on **manual** it also shows the **Snapshot** buttons at the right of the same line; see [Manual snapshots](#manual-snapshots)
 8. **Status** — live status of the capture engine, frame count, source info
 
 Once a source is selected, descriptions are injected into Hermes context before a response,
@@ -110,8 +110,8 @@ giving the assistant a live view of your screen. How often is yours to decide:
 
 ### Injection modes
 
-Pick it live in the desktop pane — the **"rides your turns"** select, just below the interval
-picker. The pick is stored in the plugin's state directory (`inject_mode`) and read on every
+Pick it live in the desktop pane — the **"rides your turns"** select, just above the
+Blink-rate picker. The pick is stored in the plugin's state directory (`inject_mode`) and read on every
 turn, so it applies to the next turn in every session without a restart. Without a pane pick,
 `PV_VISION_INJECT_MODE` — set in the environment that runs the Hermes backend — supplies the
 value; without either, the default applies. A pane pick outranks the environment variable;
@@ -138,14 +138,15 @@ would save nothing.
 
 ### Manual snapshots
 
-Set **"check for changes"** to **manual** and the watch stops checking on its own — nothing is
-described until you snapshot — while a **snapshot** row appears in the pane: one button with a
-camera icon (a camera frame) and one with a cropping-rectangle icon (a screenshot). Each button
+Set **"Blink rate"** to **manual** and the watch stops checking on its own — nothing is
+described until you snapshot — while a **Snapshot** pair appears at the right of that same
+line: one button with a camera icon (a camera frame) and one with a cropping-rectangle icon
+(a screenshot). Each button
 first pops the matching source list — cameras for the camera button; displays and application
 windows for the screen button — and picking a source opens a live view where you drag out the
 area to keep. Snapping crops at the source's full resolution, saves a PNG under the plugin's
 state directory (`snaps/`), and stages it into the chat **message input**, ready to send like
-any other image. No drag? The whole frame is taken. Switching back to a rhythm hides the row
+any other image. No drag? The whole frame is taken. Switching back to a rhythm hides it
 again, and either pick is applied to a running watch without a restart.
 
 ## Security & Privacy
