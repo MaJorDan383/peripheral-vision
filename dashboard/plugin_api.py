@@ -2533,15 +2533,24 @@ ENGINE = _Engine()
 
 # ── Manual snapshots ─────────────────────────────────────────────────────
 # The pane's "manual" rhythm grows two snapshot buttons: one hands a camera feed
-# to a drag-crop overlay, the other any display/window. A session keeps live frames
-# coming; /snap saves the crop as a PNG AND returns it base64, and the pane stages
-# it into the chat input through the app's own paste route — the whole feature is
-# plugin-side (no desktop change, no clipboard takeover).
+# to a drag-crop overlay, the other any display/window. A camera session keeps live
+# frames coming; a display/window session captures once at full resolution and crops
+# THAT still (WYSIWYG). /snap saves the crop as a PNG AND returns it base64, and the
+# pane stages it into the chat input through the app's own paste route — the whole
+# feature is plugin-side (no desktop change, no clipboard takeover).
 SNAP_TTL_S = 120.0  # an idle session this long is gone (its camera must not stay held)
 SNAP_PREVIEW_WIDTH = 960  # the overlay's feed; the SNAP itself is full resolution
 SNAP_DIR = STATE_DIR / "snaps"
 
-_SNAP: dict[str, Any] = {"id": "", "source": None, "at": 0.0, "opened_camera": False, "frames": 0}
+_SNAP: dict[str, Any] = {
+    "id": "",
+    "source": None,
+    "at": 0.0,
+    "opened_camera": False,
+    "frames": 0,
+    "still": None,  # a display/window session's full-resolution capture — the crop base
+    "still_payload": None,  # its encoded wire form, replayed on every overlay poll
+}
 
 
 def _snap_reset(release: bool = True) -> None:
@@ -2552,7 +2561,17 @@ def _snap_reset(release: bool = True) -> None:
     is conditional on this session having opened the device itself.
     """
     held = bool(_SNAP.get("opened_camera"))
-    _SNAP.update({"id": "", "source": None, "at": 0.0, "opened_camera": False, "frames": 0})
+    _SNAP.update(
+        {
+            "id": "",
+            "source": None,
+            "at": 0.0,
+            "opened_camera": False,
+            "frames": 0,
+            "still": None,
+            "still_payload": None,
+        }
+    )
     if release and held:
         release_camera()
 
@@ -2600,12 +2619,52 @@ def _snap_source_summary(source: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _snap_kind(source: dict[str, Any]) -> str:
+    """A source's kind, with the same fallbacks _grab uses for sources that predate ``kind``."""
+    return source.get("kind") or ("window" if source.get("hwnd") else "monitor")
+
+
+def _snap_payload_for(img: Any, still: bool = False) -> dict[str, Any]:
+    """The wire form of one overlay frame: a JPEG preview of ``img``."""
+    shot, out_w, out_h = _wire_jpeg(img, SNAP_PREVIEW_WIDTH)
+    payload = {
+        "ok": True,
+        "width": out_w,
+        "height": out_h,
+        "method": _grab_method() or None,
+        "waiting": _grab_waiting() or None,
+        "data_url": "data:image/jpeg;base64," + base64.b64encode(shot).decode("ascii"),
+    }
+    if still:
+        payload["still"] = True
+        payload["captured_at"] = time.time()
+    return payload
+
+
+def _snap_still_payload() -> dict[str, Any]:
+    """The stored still's wire form, encoded once and replayed on every poll."""
+    payload = _SNAP.get("still_payload")
+    if not isinstance(payload, dict):
+        payload = _snap_payload_for(_SNAP.get("still"), still=True)
+        _SNAP["still_payload"] = payload
+    return payload
+
+
 def _snap_frame_payload() -> dict[str, Any]:
-    """One fresh JPEG frame of the active session for the crop overlay (thread caller)."""
+    """One frame of the active session for the crop overlay (thread caller).
+
+    A camera keeps a LIVE feed — every poll is a fresh frame, because timing the shot is
+    the point. A display or window captures ONCE at full resolution and hands the SAME
+    still back on every poll: the crop base is exactly the image the selection was drawn
+    on, never a fresh grab that drifted from it.
+    """
     if not _SNAP.get("id"):
         return {"ok": False, "error": "no snapshot session — reopen the snapshot"}
     source = _SNAP.get("source") or {}
     _SNAP["at"] = time.time()  # the idle TTL counts from the last frame the pane asked for
+    kind = _snap_kind(source)
+    if kind != "camera" and _SNAP.get("still") is not None:
+        return _snap_still_payload()  # already captured: same bytes, no device work
     had_camera = _CAM_HANDLE.get("cap") is not None
     try:
         img = _grab(source)
@@ -2616,15 +2675,13 @@ def _snap_frame_payload() -> dict[str, Any]:
     if source.get("kind") == "camera" and not had_camera and _CAM_HANDLE.get("cap") is not None:
         _SNAP["opened_camera"] = True  # this session opened the device: it must release it
     _SNAP["frames"] = int(_SNAP.get("frames") or 0) + 1
-    shot, out_w, out_h = _wire_jpeg(img, SNAP_PREVIEW_WIDTH)
-    return {
-        "ok": True,
-        "width": out_w,
-        "height": out_h,
-        "method": _grab_method() or None,
-        "waiting": _grab_waiting() or None,
-        "data_url": "data:image/jpeg;base64," + base64.b64encode(shot).decode("ascii"),
-    }
+    if kind != "camera":
+        # The display/window still IS the session's frame: full resolution, kept for the crop.
+        _SNAP["still"] = img
+        payload = _snap_payload_for(img, still=True)
+        _SNAP["still_payload"] = payload
+        return payload
+    return _snap_payload_for(img, still=False)
 
 
 def _crop_normalized(img: Any, rect: Any) -> Any:
@@ -2655,12 +2712,18 @@ def _crop_normalized(img: Any, rect: Any) -> Any:
 
 
 def _snap_save(rect: Any) -> dict[str, Any]:
-    """A fresh full-resolution frame, cropped by ``rect``, saved as PNG (thread caller).
+    """The session's capture, cropped by ``rect``, saved as PNG (thread caller).
 
-    The base64 twin rides back to the pane so it can stage the image into the chat
-    input; the file on disk is the same pixels, there for dragging in or keeping.
+    A camera hands out a fresh full-resolution frame (it is live by design). A display or
+    window crops the session's stored still — the exact full-resolution image the overlay
+    showed — so the saved crop can never point at pixels the user never saw. The base64
+    twin rides back to the pane so it can stage the image into the chat input; the file on
+    disk is the same pixels, there for dragging in or keeping.
     """
-    img = _grab(_SNAP.get("source") or {})
+    source = _SNAP.get("source") or {}
+    img = _SNAP.get("still") if _snap_kind(source) != "camera" else None
+    if img is None:
+        img = _grab(source)
     img = _crop_normalized(img, rect)
     SNAP_DIR.mkdir(parents=True, exist_ok=True)
     name = f"snap-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}.png"
@@ -2878,11 +2941,13 @@ async def post_interval(payload: dict[str, Any] = Body(default={})) -> dict[str,
 
 @router.post("/snap/start")
 async def post_snap_start(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
-    """Open a snapshot session: live frames of ONE source for the pane's crop overlay.
+    """Open a snapshot session for ONE source: the pane's drag-crop overlay base.
 
-    Resolution mirrors /start (no enumeration for a camera id); a camera already
-    watched by the engine may be shared, but a DIFFERENT one is refused rather than
-    thrashing the single device handle. ``source_id`` is mandatory.
+    A camera gets a live feed; a display or window is captured once, at full resolution,
+    and that still is both what the overlay shows and what /snap crops. Resolution mirrors
+    /start (no enumeration for a camera id); a camera already watched by the engine may be
+    shared, but a DIFFERENT one is refused rather than thrashing the single device handle.
+    ``source_id`` is mandatory.
     """
     source_id = str(payload.get("source_id") or "").strip()
     if not source_id:
@@ -2915,7 +2980,10 @@ async def post_snap_start(payload: dict[str, Any] = Body(default={})) -> dict[st
 
 @router.get("/snap/frame")
 async def get_snap_frame(session_id: str = "") -> dict[str, Any]:
-    """One fresh frame of an open snapshot session (the overlay polls this)."""
+    """One frame of an open snapshot session (the overlay polls this).
+
+    A camera re-grabs per poll; a display/window session replays its stored still.
+    """
     if not session_id or session_id != _SNAP.get("id"):
         return {"ok": False, "error": "snapshot session not found — reopen the snapshot"}
     if time.time() - float(_SNAP.get("at") or 0) > SNAP_TTL_S:
@@ -2926,11 +2994,12 @@ async def get_snap_frame(session_id: str = "") -> dict[str, Any]:
 
 @router.post("/snap")
 async def post_snap(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
-    """Save the session's current frame — cropped when ``rect`` is given — as a PNG.
+    """Save the session's capture — cropped when ``rect`` is given — as a PNG.
 
-    The crop runs at FULL resolution (the overlay's feed is only a preview), and the
-    base64 twin in the response is what the pane stages into the chat input. The
-    session stays open so one live view can yield several crops.
+    The crop runs at FULL resolution (the overlay's feed is only a preview). A still
+    session crops the very capture the overlay showed; a camera crops a fresh frame.
+    The base64 twin in the response is what the pane stages into the chat input, and
+    the session stays open so one view can yield several crops.
     """
     session_id = str(payload.get("session_id") or "")
     if not session_id or session_id != _SNAP.get("id"):

@@ -407,6 +407,9 @@ function PeripheralVisionPane({ ctx }) {
   const frameData = snapFrame.data || {}
   const frameUrl = frameData.ok && frameData.data_url ? frameData.data_url : null
   const frameNote = frameData.ok ? frameData.waiting || null : frameData.error || null
+  // A display/window session is a still — one full-resolution capture, cropped exactly as
+  // shown; only a camera is a live feed.
+  const snapStill = Boolean(snap) && snap.kind !== 'camera'
   // Which model describes frames, and whether that model can even see them.
   const vision = useQuery({
     queryKey: [ID, 'vision'],
@@ -535,7 +538,8 @@ function PeripheralVisionPane({ ctx }) {
         setSnap({
           session_id: result.session_id,
           label: (result.source && result.source.label) || source.label,
-          kind: (result.source && result.source.kind) || source.kind || ''
+          kind: (result.source && result.source.kind) || source.kind || '',
+          source
         })
       } catch (err) {
         setError(String((err && err.message) || err))
@@ -1157,6 +1161,7 @@ function PeripheralVisionPane({ ctx }) {
             },
             children: jsx(DialogContent, {
               className: 'max-w-3xl',
+              style: snap.kind === 'monitor' ? { maxWidth: 'min(96vw, 1500px)' } : undefined,
               children: jsxs('div', {
                 className: 'flex flex-col gap-3',
                 children: [
@@ -1164,8 +1169,11 @@ function PeripheralVisionPane({ ctx }) {
                     children: [
                       jsx(DialogTitle, { children: `Snapshot — ${snap.label}` }),
                       jsx(DialogDescription, {
-                        children:
-                          'Live view. Drag over the image to choose an area — the crop goes to the message input when you snap; without a selection the whole frame does.'
+                        children: snapStill
+                          ? snap.kind === 'monitor'
+                            ? 'Full screen, at full resolution — the whole display. Drag over the image to choose an area; the crop goes to the message input when you snap, and without a selection the whole frame does.'
+                            : 'Full-resolution capture of the window. Drag over the image to choose an area; the crop goes to the message input when you snap, and without a selection the whole frame does.'
+                          : 'Live view. Drag over the image to choose an area — the crop goes to the message input when you snap; without a selection the whole frame does.'
                       })
                     ]
                   }),
@@ -1173,7 +1181,9 @@ function PeripheralVisionPane({ ctx }) {
                     ref: snapBoxRef,
                     className:
                       'relative select-none overflow-hidden rounded-md border border-(--ui-stroke-secondary) bg-black/20',
-                    style: { touchAction: 'none', cursor: 'crosshair' },
+                    style: snapStill
+                      ? { touchAction: 'none', cursor: 'crosshair', width: 'fit-content', margin: '0 auto' }
+                      : { touchAction: 'none', cursor: 'crosshair' },
                     onPointerDown: onSnapPointerDown,
                     onPointerMove: onSnapPointerMove,
                     onPointerUp: onSnapPointerUp,
@@ -1181,9 +1191,10 @@ function PeripheralVisionPane({ ctx }) {
                       frameUrl
                         ? jsx('img', {
                             src: frameUrl,
-                            alt: 'live snapshot view',
+                            alt: snapStill ? 'snapshot view' : 'live snapshot view',
                             draggable: false,
-                            className: 'block w-full select-none'
+                            className: snapStill ? 'block select-none' : 'block w-full select-none',
+                            style: snapStill ? { maxWidth: '100%', maxHeight: '72vh' } : undefined
                           })
                         : jsx('div', {
                             className:
@@ -1214,6 +1225,14 @@ function PeripheralVisionPane({ ctx }) {
                       className: 'flex items-center gap-2',
                       children: [
                         jsx(Button, { variant: 'ghost', onClick: stopSnap, children: 'Cancel' }),
+                        snapStill
+                          ? jsx(Button, {
+                              variant: 'ghost',
+                              disabled: snapBusy,
+                              onClick: () => snap.source && openSnap(snap.source),
+                              children: 'Retake'
+                            })
+                          : null,
                         jsx(Button, {
                           disabled: snapBusy,
                           onClick: doSnap,

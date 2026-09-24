@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import importlib.util
+import io
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,9 +72,29 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(api, "release_camera", release)
     abort = _Count()
     monkeypatch.setattr(api, "abort_camera_probe", abort)
-    api._SNAP.update({"id": "", "source": None, "at": 0.0, "opened_camera": False, "frames": 0})
+    api._SNAP.update(
+        {
+            "id": "",
+            "source": None,
+            "at": 0.0,
+            "opened_camera": False,
+            "frames": 0,
+            "still": None,
+            "still_payload": None,
+        }
+    )
     yield SimpleNamespace(tmp=tmp_path, release=release, abort=abort)
-    api._SNAP.update({"id": "", "source": None, "at": 0.0, "opened_camera": False, "frames": 0})
+    api._SNAP.update(
+        {
+            "id": "",
+            "source": None,
+            "at": 0.0,
+            "opened_camera": False,
+            "frames": 0,
+            "still": None,
+            "still_payload": None,
+        }
+    )
 
 
 # ── the interval pick ────────────────────────────────────────────────────────
@@ -150,7 +171,15 @@ def test_snap_sessions_expire_and_unknown_ids_are_refused(sandbox) -> None:
     assert asyncio.run(api.get_snap_frame("nope"))["ok"] is False
     assert asyncio.run(api.post_snap({"session_id": "nope"}))["ok"] is False
     api._SNAP.update(
-        {"id": "abc", "source": _monitor(), "at": time.time() - api.SNAP_TTL_S - 1, "opened_camera": False, "frames": 0}
+        {
+            "id": "abc",
+            "source": _monitor(),
+            "at": time.time() - api.SNAP_TTL_S - 1,
+            "opened_camera": False,
+            "frames": 0,
+            "still": None,
+            "still_payload": None,
+        }
     )
     expired = asyncio.run(api.get_snap_frame("abc"))
     assert expired["ok"] is False and "expired" in expired["error"]
@@ -242,8 +271,81 @@ def test_status_reaps_an_idle_session(sandbox, monkeypatch) -> None:
             "at": time.time() - api.SNAP_TTL_S - 20,
             "opened_camera": True,
             "frames": 0,
+            "still": None,
+            "still_payload": None,
         }
     )
     asyncio.run(api.get_status())
     assert api._SNAP["id"] == "", "a killed overlay's session must not outlive the poll"
     assert sandbox.release.calls == 1, "and its camera must be let go"
+
+
+# ── stills vs live feeds ─────────────────────────────────────────────────────
+
+
+def test_a_display_session_is_one_still_replayed_for_every_poll(sandbox, monkeypatch) -> None:
+    """The crop base is the exact capture the overlay showed — never a re-grab that drifted."""
+    monkeypatch.setattr(api, "_source_from_id", lambda sid: _monitor(sid))
+    grabs = _Count()
+    colors = [(10, 0, 0), (20, 0, 0), (30, 0, 0)]
+
+    def counted(source):
+        grabs()
+        return Image.new("RGB", (200, 100), colors[min(grabs.calls - 1, 2)])
+
+    monkeypatch.setattr(api, "_grab", counted)
+    started = asyncio.run(api.post_snap_start({"source_id": "monitor-1"}))
+    assert started["ok"] is True
+    assert started["frame"].get("still") is True, "a display session is a still, not a live feed"
+    assert grabs.calls == 1
+    for _ in range(3):
+        frame = asyncio.run(api.get_snap_frame(started["session_id"]))
+        assert frame["ok"] is True and frame.get("still") is True
+    assert grabs.calls == 1, "polling a still never re-grabs"
+    result = asyncio.run(
+        api.post_snap({"session_id": started["session_id"], "rect": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}})
+    )
+    assert result["ok"] is True and (result["width"], result["height"]) == (100, 50)
+    assert grabs.calls == 1, "the crop runs on the stored still — the pixels the user circled"
+    with Image.open(io.BytesIO(base64.b64decode(result["png_b64"]))) as crop:
+        assert crop.getpixel((5, 5)) == (10, 0, 0)
+
+
+def test_a_window_session_uses_the_last_capture_and_a_retake_recaptures(sandbox, monkeypatch) -> None:
+    window = {"id": "window-3", "label": "Notepad", "kind": "window", "hwnd": 1234, "width": 800, "height": 600}
+    monkeypatch.setattr(api, "_source_from_id", lambda sid: window)
+    grabs = _Count()
+
+    def counted(source):
+        grabs()
+        return _frame()
+
+    monkeypatch.setattr(api, "_grab", counted)
+    started = asyncio.run(api.post_snap_start({"source_id": "window-3"}))
+    assert started["ok"] is True and started["frame"].get("still") is True
+    again = asyncio.run(api.get_snap_frame(started["session_id"]))
+    assert again.get("still") is True and grabs.calls == 1
+    # Retake is a second /snap/start for the same id: exactly one fresh capture, new session.
+    retaken = asyncio.run(api.post_snap_start({"source_id": "window-3"}))
+    assert retaken["ok"] is True and grabs.calls == 2
+    assert retaken["session_id"] != started["session_id"]
+
+
+def test_a_camera_stays_live_and_its_snap_re_grabs(sandbox, monkeypatch) -> None:
+    monkeypatch.setattr(api, "_source_from_id", lambda sid: _camera(1))
+    grabs = _Count()
+
+    def counted(source):
+        grabs()
+        return _frame()
+
+    monkeypatch.setattr(api, "_grab", counted)
+    started = asyncio.run(api.post_snap_start({"source_id": "camera-1"}))
+    assert started["ok"] is True
+    assert "still" not in started["frame"], "a camera session is live, not a still"
+    assert grabs.calls == 1
+    for _ in range(2):
+        asyncio.run(api.get_snap_frame(started["session_id"]))
+    assert grabs.calls == 3, "every camera poll is a fresh frame"
+    result = asyncio.run(api.post_snap({"session_id": started["session_id"]}))
+    assert result["ok"] is True and grabs.calls == 4, "a camera snap grabs its own fresh frame"
