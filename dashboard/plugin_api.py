@@ -332,6 +332,17 @@ def list_windows(limit: int = 150) -> list[dict[str, Any]]:
                 seen.add(h)
                 if not user32.IsWindowVisible(ctypes.c_void_p(h)):
                     return True
+                # Our own windows are skipped BEFORE the title calls below, and that order is
+                # load-bearing: GetWindowTextLengthW/GetWindowTextW deliver a message to the
+                # window's owning thread, and for a window owned by THIS process the kernel
+                # applies no timeout. The off-screen thumbnail host (_THUMB_CLASS) is shown by
+                # design but owned by a capture thread that pumps no messages, so a title call
+                # on it would block this thread forever and every later enumeration of sources
+                # would queue behind it.
+                pid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(ctypes.c_void_p(h), ctypes.byref(pid))
+                if h == int(_THUMB_HOST.get("hwnd") or 0) or int(pid.value) == own_pid:
+                    return True  # never watch ourselves
                 length = user32.GetWindowTextLengthW(ctypes.c_void_p(h))
                 if length <= 0:
                     return True
@@ -352,10 +363,6 @@ def list_windows(limit: int = 150) -> list[dict[str, Any]]:
                     return True
                 if _is_cloaked(h):
                     return True
-                pid = ctypes.c_ulong(0)
-                user32.GetWindowThreadProcessId(ctypes.c_void_p(h), ctypes.byref(pid))
-                if int(pid.value) == own_pid:
-                    return True  # never watch ourselves
                 minimized = bool(user32.IsIconic(ctypes.c_void_p(h)))
                 rect = _window_rect(h)
                 if minimized:
