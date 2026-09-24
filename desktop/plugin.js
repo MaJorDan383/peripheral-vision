@@ -830,15 +830,23 @@ function PeripheralVisionPane({ ctx }) {
                 : 'no model',
               visionRoute.source === 'pinned'
                 ? ' (pinned)'
-                : visionRoute.active_source === 'session'
-                  ? ' (this session)'
-                  : ' (config default — no live session reported yet)'
+                : visionRoute.source === 'auxiliary'
+                  ? ' (auxiliary vision)'
+                  : visionRoute.active_source === 'session'
+                    ? ' (this session)'
+                    : ' (config default — no live session reported yet)'
             ]
           }),
           visionRoute.source === 'pinned'
             ? jsx('span', {
                 className: 'text-(--ui-text-quaternary)',
                 children: 'vision model pinned'
+              })
+            : null,
+          visionRoute.source === 'auxiliary'
+            ? jsx('span', {
+                className: 'text-(--ui-text-quaternary)',
+                children: 'using your auxiliary vision model'
               })
             : null,
           visionRoute.source !== 'pinned' && visionRoute.fallback_model
@@ -854,7 +862,7 @@ function PeripheralVisionPane({ ctx }) {
                   jsx('span', {
                     className: 'text-(--ui-danger)',
                     children: `Live descriptions are paused — ${
-                      [visionRoute.active_provider, visionRoute.active_model].filter(Boolean).join(' / ') ||
+                      [visionRoute.provider, visionRoute.model].filter(Boolean).join(' / ') ||
                       'the current model'
                     } can't accept images.`
                   }),

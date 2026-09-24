@@ -3,6 +3,23 @@
 All notable changes to this plugin. Nothing before the first public release was published, so
 `1.0.0` covers the whole plugin as shipped.
 
+## [Unreleased]
+
+### Added
+- **An auxiliary vision model is honored.** When one is picked in Hermes' own settings
+  (`auxiliary.vision` in `config.yaml`), the watch's live descriptions route to it — the same
+  rule Hermes applies to images attached to a turn, and it holds even when the session model
+  could see. With no pick, routing is unchanged: the session model while it can see, then a
+  pane-pinned model for text-only sessions. The pane's route line says `(auxiliary vision)` so
+  what describes frames is never a guess.
+
+### Changed
+- **Manual snapshots crop the full-resolution still.** A display or window snapshot session
+  captures once, at the source's native resolution; every frame the overlay shows is that same
+  capture replayed, so the saved crop is exactly the region you dragged, at full detail — and a
+  new **Retake** button re-captures in place. Display sessions open in a wide dialog: the still
+  is the whole screen. Camera snapshots stay live, unchanged.
+
 ## [1.3.0] - 2026-09-23
 
 ### Added

@@ -7,7 +7,8 @@ Peripheral Vision is a Hermes plugin that keeps a live view of your screen, wind
 - **Monitor capture** — grabs frames from all connected displays via DWM
 - **Window capture** — captures specific applications by window handle
 - **Camera capture** — enumerates cameras (DSHOW) and grabs frames
-- **Vision routing** — sends frames to the configured vision model automatically
+- **Vision routing** — sends frames to your auxiliary vision model when one is picked in
+  Hermes' own settings, otherwise to the model the live session is running
 - **Pre-LLM context injection** — adds live descriptions to a turn through the `pre_llm_call` hook, gated by the inject mode (picked in the pane, or `PV_VISION_INJECT_MODE`) so a screen that has not moved does not pay for itself on every turn
 - **Desktop pane** — shows a live preview with monitor/window/camera picker, vision model candidates, and pin support
 - **Manual snapshots** — set "check for changes" to manual and snapshot on demand: a camera frame, or a drag-cropped screenshot of a display or window, lands in the message input ready to send
@@ -83,9 +84,12 @@ the Hermes backend (the desktop app inherits your user environment):
 | `PV_CAMERA_PROBE_TIMEOUT_S` | `5.0` | Timeout (seconds) for detecting one camera |
 | `PV_CAMERA_PROBE_WAVE` | `2` | Camera probe waves before giving up |
 
-Choosing the vision model is **not** an environment variable: pin it from the desktop pane,
-which writes `vision_model.json` into the plugin's state directory. An empty pin restores
-automatic routing to whatever model the live session is running.
+Choosing the vision model is **not** an environment variable. Precedence: an explicit
+`auxiliary.vision` model in Hermes' own settings (Settings → Models) is the vision route —
+frames go there even when the session model can see; with no pick, frames go to the model the
+live session is running while it can see; a text-only session falls back to a model pinned from
+the desktop pane (`vision_model.json` in the plugin's state directory). An empty pin restores
+automatic routing.
 
 ## Usage
 

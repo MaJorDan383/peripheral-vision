@@ -1807,14 +1807,35 @@ def _interval_state(running: bool) -> dict[str, Any]:
     return {"ms": DEFAULT_INTERVAL_MS, "source": "default"}
 
 
+def _aux_vision_target(cfg: dict[str, Any]) -> dict[str, str]:
+    """The user's explicit ``auxiliary.vision`` pick (provider/model/base_url), or {}.
+
+    Mirrors Hermes' own predicate (``agent.image_routing._explicit_aux_vision_override``):
+    an ``auto``/empty provider with no model and no base_url is a placeholder, not a pick.
+    A real pick IS the vision route — Hermes sends image work there even when the main
+    model can see, and so does this plugin.
+    """
+    aux = cfg.get("auxiliary") if isinstance(cfg.get("auxiliary"), dict) else {}
+    vision = aux.get("vision") if isinstance(aux.get("vision"), dict) else {}
+    provider = str(vision.get("provider") or "").strip()
+    model = str(vision.get("model") or "").strip()
+    base_url = str(vision.get("base_url") or "").strip()
+    if not vision or (provider.lower() in {"", "auto"} and not model and not base_url):
+        return {}
+    return {"provider": provider, "model": model, "base_url": base_url}
+
+
 def _route(session_id: str = "") -> dict[str, Any]:
     """Resolve the model that describes frames.
 
-    The model the CURRENT SESSION is running always wins while it can see — that is
-    the point: frames go to whatever model the conversation is on right now. A
-    pinned vision model is swapped in only when Hermes knows the session model is
-    text-only, and otherwise stays in ``fallback_*`` so a runtime refusal can fall
-    back to it exactly once.
+    Precedence:
+    1. an explicit ``auxiliary.vision`` pick in Hermes' config — the user named the model
+       that does vision work, so frames go there (the same rule Hermes applies to images
+       attached to a turn, even when the session model can see);
+    2. otherwise, the model the CURRENT SESSION is running while it can see — frames go
+       to whatever model the conversation is on right now;
+    3. otherwise (a text-only session), a model pinned from the pane, which also stays
+       in ``fallback_*`` so a runtime refusal can fall back to it exactly once.
     """
     sid = session_id or str(_WATCH_SESSION.get("id") or "")
     cfg = _hermes_cfg()
@@ -1824,14 +1845,24 @@ def _route(session_id: str = "") -> dict[str, Any]:
         if active_provider and active_model
         else None
     )
+    aux = _aux_vision_target(cfg)
     pinned = _pin()
-    use_pin = bool(pinned.get("model")) and active_caps is False
-    provider = pinned.get("provider") if use_pin else active_provider
-    model = pinned.get("model") if use_pin else active_model
+    if aux:
+        # The user picked a vision model in Hermes' own settings: descriptions go there.
+        provider = aux["provider"] or active_provider
+        model = aux["model"] or active_model
+        source = "auxiliary"
+        base_url = aux["base_url"] or _endpoint(cfg, provider, sid)[0]
+    else:
+        use_pin = bool(pinned.get("model")) and active_caps is False
+        provider = pinned.get("provider") if use_pin else active_provider
+        model = pinned.get("model") if use_pin else active_model
+        source = "pinned" if use_pin else active_source
+        base_url = _endpoint(cfg, provider, sid)[0]
     return {
         "provider": provider,
         "model": model,
-        "source": "pinned" if use_pin else active_source,
+        "source": source,
         "active_provider": active_provider,
         "active_model": active_model,
         "active_source": active_source,
@@ -1842,7 +1873,7 @@ def _route(session_id: str = "") -> dict[str, Any]:
         ),
         "fallback_provider": pinned.get("provider", ""),
         "fallback_model": pinned.get("model", ""),
-        "base_url": _endpoint(cfg, provider, sid)[0],
+        "base_url": base_url,
     }
 
 
