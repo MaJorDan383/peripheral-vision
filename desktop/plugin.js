@@ -854,12 +854,6 @@ function PeripheralVisionPane({ ctx }) {
                 children: 'vision model pinned'
               })
             : null,
-          visionRoute.source === 'auxiliary'
-            ? jsx('span', {
-                className: 'text-(--ui-text-quaternary)',
-                children: 'using your auxiliary vision model'
-              })
-            : null,
           visionRoute.source !== 'pinned' && visionRoute.fallback_model
             ? jsx('span', {
                 className: 'text-(--ui-text-quaternary)',
