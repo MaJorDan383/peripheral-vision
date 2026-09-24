@@ -557,3 +557,56 @@ def test_failed_upgrade_keeps_the_old_still(sandbox, monkeypatch) -> None:
     payload = api._snap_frame_payload()
     assert payload["ok"] is True and (payload["width"], payload["height"]) == (320, 240)
     assert api._SNAP["non_live_still"] is True, "a failed upgrade retries on the next poll"
+
+
+def test_upgrade_waits_for_the_restore_animation_to_settle(sandbox, monkeypatch) -> None:
+    _prime_still()
+    monkeypatch.setattr(api, "_window_iconic", lambda hwnd: False)
+    reads = iter([(0, 0, 1000, 500), (0, 0, 1000, 120)])  # still growing mid-restore
+    monkeypatch.setattr(api, "_window_rect", lambda hwnd: next(reads))
+
+    def boom(src):
+        raise AssertionError("must not grab while the window is still animating")
+
+    monkeypatch.setattr(api, "_grab", boom)
+    payload = api._snap_frame_payload()
+    assert (payload["width"], payload["height"]) == (320, 240), "the DWM frame replays while the window settles"
+    assert api._SNAP["non_live_still"] is True, "the upgrade retries on the next poll"
+
+
+def test_upgrade_rejects_a_capture_that_raced_the_animation(sandbox, monkeypatch) -> None:
+    _prime_still()
+    monkeypatch.setattr(api, "_window_iconic", lambda hwnd: False)
+    monkeypatch.setattr(api, "_window_rect", lambda hwnd: (0, 0, 1000, 500))
+    monkeypatch.setattr(api, "_grab", lambda src: _frame(1000, 160))  # a clipped top band
+
+    payload = api._snap_frame_payload()
+    assert (payload["width"], payload["height"]) == (320, 240), "a mismatched grab never becomes the still"
+    assert api._SNAP["non_live_still"] is True
+
+
+def test_upgrade_grabs_where_the_window_is_now(sandbox, monkeypatch) -> None:
+    _prime_still()
+    monkeypatch.setattr(api, "_window_iconic", lambda hwnd: False)
+    monkeypatch.setattr(api, "_window_rect", lambda hwnd: (100, 50, 1100, 550))
+    seen = {}
+
+    def grab(src):
+        seen.update(src)
+        return _frame(1000, 500)
+
+    monkeypatch.setattr(api, "_grab", grab)
+    payload = api._snap_frame_payload()
+    assert (seen["x"], seen["y"], seen["width"], seen["height"]) == (100, 50, 1000, 500), \
+        "the placement rect from snap time is replaced by the window's live frame bounds"
+    assert api._SNAP["non_live_still"] is False and payload["width"] == 1000
+
+
+def test_window_rested_needs_two_steady_reads(sandbox, monkeypatch) -> None:
+    reads = iter([(0, 0, 1000, 500), (0, 0, 1000, 500)])
+    monkeypatch.setattr(api, "_window_rect", lambda hwnd: next(reads))
+    assert api._window_rested(777) is True
+
+    reads = iter([(0, 0, 1000, 500), (0, 0, 1000, 499)])
+    monkeypatch.setattr(api, "_window_rect", lambda hwnd: next(reads))
+    assert api._window_rested(777) is False

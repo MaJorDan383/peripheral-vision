@@ -33,8 +33,10 @@ All notable changes to this plugin. Nothing before the first public release was 
   behind a window that stopped pumping its queue times out with an answer instead of holding the
   pane, and minimized-window thumbnail captures run on the one thread that owns their helper
   window, so one stalled capture can never hold back the next. A crop view opened on a window
-  that is minimized upgrades itself the moment that window is restored — the frozen DWM
-  frame sharpens into a live full-resolution capture, no Retake.
+  that is minimized upgrades itself once that window is restored and settled — the upgrade
+  waits out the restore animation and matches the capture to the window's live frame bounds,
+  so a poll that lands mid-restore can never adopt a clipped band — and the frozen DWM frame
+  sharpens into a live full-resolution capture, no Retake.
 
 ## [1.3.0] - 2026-09-23
 

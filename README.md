@@ -152,7 +152,9 @@ up to 1920 px wide while the crop itself is cut from the full-resolution capture
 that reaches the input stays sharp from a 4K display; and if a live capture fails — a minimized
 window whose surface has gone blank, a camera that hands out no frame — the snapshot answers
 with the **last frame captured** for that source, labelled with its age. Restoring a minimized window while its crop
-view is open upgrades the feed to a fresh full-resolution capture on the next poll, no
+view is open upgrades the feed to a fresh full-resolution capture on the next poll — waiting
+out the restore animation and matching the capture to the window's live frame bounds, so a
+poll that lands mid-restore keeps the frozen frame instead of adopting a clipped one — no
 Retake needed.
 
 ## Security & Privacy

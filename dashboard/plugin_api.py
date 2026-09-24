@@ -2771,12 +2771,28 @@ def _window_iconic(hwnd: int) -> bool:
         return False
 
 
+def _window_rested(hwnd: int) -> bool:
+    """True once a window's DWM frame bounds stop changing (a restore animation has settled).
+
+    Restoring a window runs a system animation, and a maximized one grows top-down in full-width
+    bands: a capture taken then is sized from the partial bounds, so it comes back as a clipped
+    top band of the window. Two reads a beat apart tell a settling window from a settled one.
+    """
+    first = _window_rect(hwnd)
+    if not first:
+        return True  # unknown geometry: let the post-grab size check decide
+    time.sleep(0.12)
+    return _window_rect(hwnd) == first
+
+
 def _snap_maybe_upgrade_still() -> None:
     """Re-capture a still that came from a minimized (or failing) window once it is live again.
 
     The overlay can sit open on a minimized window showing its DWM last frame; restoring the
-    window would otherwise leave that frozen frame on screen until a manual Retake. Best-effort:
-    any failure keeps replaying the still this session already has.
+    window would otherwise leave that frozen frame on screen until a manual Retake. The first
+    poll after a restore can land mid-animation, so the window must be rested and the capture
+    must match its live frame bounds — otherwise the DWM frame keeps replaying and this retries
+    on the next poll. Best-effort: any failure keeps the still this session already has.
     """
     src = _SNAP.get("source") or {}
     if not _SNAP.get("non_live_still") or _snap_kind(src) != "window":
@@ -2784,10 +2800,30 @@ def _snap_maybe_upgrade_still() -> None:
     hwnd = int(src.get("hwnd") or 0)
     if hwnd and _window_iconic(hwnd):
         return  # still minimized — the DWM frame is the honest frame
+    if hwnd and not _window_rested(hwnd):
+        return  # mid restore animation; a capture now would freeze a clipped band
+    fresh = _window_rect(hwnd) if hwnd else None
+    if fresh:
+        # the source dict still carries the placement rect from snap time; a window restored to
+        # a different geometry (maximized, resized, moved) must be grabbed where it IS now
+        src = {
+            **src,
+            "x": fresh[0],
+            "y": fresh[1],
+            "width": max(1, fresh[2] - fresh[0]),
+            "height": max(1, fresh[3] - fresh[1]),
+        }
     try:
         img = _grab(src)
     except Exception:
         return  # keep replaying what we have; Retake is still there
+    if fresh:
+        want_w, want_h = fresh[2] - fresh[0], fresh[3] - fresh[1]
+        got_w, got_h = img.size
+        if want_w > 0 and want_h > 0 and (
+            abs(got_w - want_w) > 0.08 * want_w or abs(got_h - want_h) > 0.08 * want_h
+        ):
+            return  # the window moved during the grab; keep the DWM frame, retry next poll
     _SNAP["still"] = img
     _SNAP["still_payload"] = None  # next _snap_still_payload re-encodes from the sharper still
     _SNAP["non_live_still"] = False
