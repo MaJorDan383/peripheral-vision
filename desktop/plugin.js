@@ -837,6 +837,15 @@ function PeripheralVisionPane({ ctx }) {
                     : ' (config default — no live session reported yet)'
             ]
           }),
+          data.source_label
+            ? jsx('span', {
+                className: 'font-medium text-(--ui-text-tertiary)',
+                children: data.source_label
+              })
+            : jsx('span', {
+                className: 'text-(--ui-text-quaternary)',
+                children: 'nothing watched yet'
+              }),
           visionRoute.source === 'pinned'
             ? jsx('span', {
                 className: 'text-(--ui-text-quaternary)',

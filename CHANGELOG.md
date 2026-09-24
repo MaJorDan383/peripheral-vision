@@ -12,6 +12,8 @@ All notable changes to this plugin. Nothing before the first public release was 
   could see. With no pick, routing is unchanged: the session model while it can see, then a
   pane-pinned model for text-only sessions. The pane's route line says `(auxiliary vision)` so
   what describes frames is never a guess.
+- **The vision box names the watched source.** A small title line under the model line shows
+  what the watch is looking at right now — display, window, or camera.
 
 ### Changed
 - **Manual snapshots crop the full-resolution still.** A display or window snapshot session
