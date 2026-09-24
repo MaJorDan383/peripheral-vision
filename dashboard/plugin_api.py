@@ -2661,6 +2661,7 @@ _SNAP: dict[str, Any] = {
     "frames": 0,
     "still": None,  # a display/window session's full-resolution capture — the crop base
     "still_payload": None,  # its encoded wire form, replayed on every overlay poll
+    "non_live_still": False,  # the still came from a minimized/failed grab — upgrade when live
 }
 
 
@@ -2681,6 +2682,7 @@ def _snap_reset(release: bool = True) -> None:
             "frames": 0,
             "still": None,
             "still_payload": None,
+            "non_live_still": False,
         }
     )
     if release and held:
@@ -2761,13 +2763,45 @@ def _snap_still_payload() -> dict[str, Any]:
     return payload
 
 
+def _window_iconic(hwnd: int) -> bool:
+    """Is this window minimized right now? (its own seam — tests stub it, no Win32 in CI)"""
+    try:
+        return bool(ctypes.windll.user32.IsIconic(ctypes.c_void_p(int(hwnd))))
+    except Exception:
+        return False
+
+
+def _snap_maybe_upgrade_still() -> None:
+    """Re-capture a still that came from a minimized (or failing) window once it is live again.
+
+    The overlay can sit open on a minimized window showing its DWM last frame; restoring the
+    window would otherwise leave that frozen frame on screen until a manual Retake. Best-effort:
+    any failure keeps replaying the still this session already has.
+    """
+    src = _SNAP.get("source") or {}
+    if not _SNAP.get("non_live_still") or _snap_kind(src) != "window":
+        return
+    hwnd = int(src.get("hwnd") or 0)
+    if hwnd and _window_iconic(hwnd):
+        return  # still minimized — the DWM frame is the honest frame
+    try:
+        img = _grab(src)
+    except Exception:
+        return  # keep replaying what we have; Retake is still there
+    _SNAP["still"] = img
+    _SNAP["still_payload"] = None  # next _snap_still_payload re-encodes from the sharper still
+    _SNAP["non_live_still"] = False
+
+
 def _snap_frame_payload() -> dict[str, Any]:
     """One frame of the active session for the crop overlay (thread caller).
 
     A camera keeps a LIVE feed — every poll is a fresh frame, because timing the shot is
     the point. A display or window captures ONCE at full resolution and hands the SAME
     still back on every poll: the crop base is exactly the image the selection was drawn
-    on, never a fresh grab that drifted from it.
+    on, never a fresh grab that drifted from it. A still that started non-live (a minimized
+    window's DWM frame) upgrades itself once that window is restored — see
+    _snap_maybe_upgrade_still.
     """
     if not _SNAP.get("id"):
         return {"ok": False, "error": "no snapshot session — reopen the snapshot"}
@@ -2775,6 +2809,7 @@ def _snap_frame_payload() -> dict[str, Any]:
     _SNAP["at"] = time.time()  # the idle TTL counts from the last frame the pane asked for
     kind = _snap_kind(source)
     if kind != "camera" and _SNAP.get("still") is not None:
+        _snap_maybe_upgrade_still()  # a restored window sharpens the feed without a Retake
         return _snap_still_payload()  # already captured: same bytes, no device work
     had_camera = _CAM_HANDLE.get("cap") is not None
     note = ""
@@ -2796,6 +2831,7 @@ def _snap_frame_payload() -> dict[str, Any]:
     if kind != "camera":
         # The display/window still IS the session's frame: full resolution, kept for the crop.
         _SNAP["still"] = img
+        _SNAP["non_live_still"] = bool(note) or _grab_method() == "thumbnail"
         payload = _snap_payload_for(img, still=True)
         if note:
             payload["waiting"] = note

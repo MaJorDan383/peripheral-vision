@@ -502,3 +502,58 @@ def test_preview_without_a_last_frame_reports_the_reason(sandbox, monkeypatch) -
     monkeypatch.setattr(api, "_grab", gone)
     got = asyncio.run(api.get_preview(width=64, hwnd=777))
     assert got["ok"] is False and "no frame" in got["error"]
+
+
+# ── the minimized → restored upgrade ────────────────────────────────────────
+
+
+def _prime_still(session: str = "s1") -> dict:
+    """A window session parked on a small non-live still, as if captured while minimized."""
+    src = _window_source("window-777")
+    thumb = _frame(320, 240)
+    api._SNAP.update({
+        "id": session, "source": src, "at": time.time(), "opened_camera": False,
+        "frames": 1, "still": thumb, "still_payload": None, "non_live_still": True,
+    })
+    return api._snap_still_payload()
+
+
+def test_still_upgrades_once_the_window_is_restored(sandbox, monkeypatch) -> None:
+    _prime_still()
+    monkeypatch.setattr(api, "_window_iconic", lambda hwnd: False)
+    big = _frame(640, 480)
+    monkeypatch.setattr(api, "_grab", lambda src: big)
+
+    payload = api._snap_frame_payload()
+    assert api._SNAP["still"] is big, "the session still is the fresh full grab"
+    assert api._SNAP["non_live_still"] is False
+    assert (payload["width"], payload["height"]) == (640, 480), "the wire form is re-encoded"
+    assert payload.get("waiting") is None
+    assert payload.get("still") is True
+    assert api._snap_frame_payload()["width"] == 640, "and it replays from then on"
+
+
+def test_no_upgrade_while_the_window_is_still_minimized(sandbox, monkeypatch) -> None:
+    _prime_still()
+    monkeypatch.setattr(api, "_window_iconic", lambda hwnd: True)
+
+    def boom(src):
+        raise AssertionError("must not grab while minimized")
+
+    monkeypatch.setattr(api, "_grab", boom)
+    payload = api._snap_frame_payload()
+    assert (payload["width"], payload["height"]) == (320, 240), "the DWM still replays untouched"
+    assert api._SNAP["non_live_still"] is True
+
+
+def test_failed_upgrade_keeps_the_old_still(sandbox, monkeypatch) -> None:
+    _prime_still()
+    monkeypatch.setattr(api, "_window_iconic", lambda hwnd: False)
+
+    def gone(src):
+        raise api._SourceMinimized("DWM returned no frame")
+
+    monkeypatch.setattr(api, "_grab", gone)
+    payload = api._snap_frame_payload()
+    assert payload["ok"] is True and (payload["width"], payload["height"]) == (320, 240)
+    assert api._SNAP["non_live_still"] is True, "a failed upgrade retries on the next poll"

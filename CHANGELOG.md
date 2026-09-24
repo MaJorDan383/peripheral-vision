@@ -32,7 +32,9 @@ All notable changes to this plugin. Nothing before the first public release was 
   feed, and the saved snap alike — labelled with its age; a grab that stalls
   behind a window that stopped pumping its queue times out with an answer instead of holding the
   pane, and minimized-window thumbnail captures run on the one thread that owns their helper
-  window, so one stalled capture can never hold back the next.
+  window, so one stalled capture can never hold back the next. A crop view opened on a window
+  that is minimized upgrades itself the moment that window is restored — the frozen DWM
+  frame sharpens into a live full-resolution capture, no Retake.
 
 ## [1.3.0] - 2026-09-23
 
