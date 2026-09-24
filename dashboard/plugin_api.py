@@ -35,6 +35,8 @@ import re
 import threading
 import time
 import uuid
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
@@ -838,11 +840,66 @@ _THUMB_MAX_EDGE = 1920  # measured: a minimized window's DWM surface carries no 
 # real pixels for small/medium windows without feeding DWM's upscaler for huge ones
 _CAM_LOCK = threading.Lock()
 _THUMB_LOCK = threading.Lock()  # serialises DWM-thumbnail captures through the one shared host window
+# The shared host window must live on ONE thread for the process's life (see _grab_window_thumbnail):
+# every thumbnail capture hops onto this single-thread executor, whose worker created the host and is
+# the only thread that pumps its messages.
+_THUMB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pv-thumb")
 _LOG_LOCK = threading.Lock()    # serialises log ring-buffer reads + writes so concurrent engine ticks can't corrupt log.jsonl
 _PREVIEW_LOCK = threading.Lock()
 _PREVIEW_CACHE: dict[tuple[int, int], dict[str, Any]] = {}  # (frame_seq, width) -> /preview payload
 _PREVIEW_CACHE_MAX = 32  # the pane asks for a handful of widths; the rest is the picker's rows
 _CAM_HANDLE: dict[str, Any] = {"cap": None, "index": None}
+
+# ── Last-frame cache ──────────────────────────────────────────────────────
+# Every successful capture is remembered per source, so a later capture that fails — a minimized
+# window whose DWM surface came back blank, a camera that hands out no frame — can answer with the
+# last real frame instead of an error. A handful of full-resolution images: newest wins.
+_LAST_FRAME_LOCK = threading.Lock()
+_LAST_FRAMES: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+_LAST_FRAMES_MAX = 6
+
+
+def _frame_key(source: dict[str, Any]) -> str:
+    kind = source.get("kind") or ("window" if source.get("hwnd") else "monitor")
+    ident = source.get("id") or source.get("hwnd") or source.get("index")
+    return f"{kind}:{ident}"
+
+
+def _remember_frame(source: dict[str, Any], img: Any) -> None:
+    """Keep ``img`` as that source's last good frame. Best-effort: never fail a capture over it."""
+    try:
+        if img is None:
+            return
+        key = _frame_key(source)
+        with _LAST_FRAME_LOCK:
+            _LAST_FRAMES[key] = {"img": img, "at": time.time(), "label": source.get("label") or key}
+            _LAST_FRAMES.move_to_end(key)
+            while len(_LAST_FRAMES) > _LAST_FRAMES_MAX:
+                _LAST_FRAMES.popitem(last=False)
+    except Exception:
+        pass
+
+
+def _recall_frame(source: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """That source's last good frame — ``{"img", "at", "label"}`` — or None."""
+    try:
+        key = _frame_key(source)
+    except Exception:
+        return None
+    with _LAST_FRAME_LOCK:
+        entry = _LAST_FRAMES.get(key)
+        if entry is None:
+            return None
+        _LAST_FRAMES.move_to_end(key)
+        return dict(entry)
+
+
+def _fallback_note(source: dict[str, Any], entry: dict[str, Any], reason: str) -> str:
+    """The waiting-style note a served fallback frame carries (the pane shows it verbatim)."""
+    age = max(0.0, time.time() - float(entry.get("at") or 0.0))
+    ago = f"{int(age)}s ago" if age < 120 else f"{int(age // 60)}m ago"
+    label = source.get("label") or entry.get("label") or "that source"
+    return f"live capture failed ({reason[:120]}); showing the last frame captured for {label} — {ago}"
 
 
 def _grab_monitor(source: dict[str, Any]):
@@ -1092,7 +1149,19 @@ def _grab_window_thumbnail(source: dict[str, Any]):
 
     Captured at the window's own device-pixel size with the whole frame (title bar included): a
     larger destination only makes DWM upscale, a smaller one discards detail it can really supply.
+
+    The capture runs on ``_THUMB_EXECUTOR``'s one thread: a window's message queue is pumped only
+    by the thread that created it, so a host reused from a different thread blocks forever inside
+    ``PrintWindow`` — and that stuck call holds ``_THUMB_LOCK`` against every capture after it.
+    The grab state is set here, on the caller's thread-local, not the worker's.
     """
+    image = _THUMB_EXECUTOR.submit(_thumb_capture, source).result()
+    _GRAB_STATE.method = "thumbnail"
+    return image
+
+
+def _thumb_capture(source: dict[str, Any]):
+    """The DWM-thumbnail capture itself; only ever runs on ``_THUMB_EXECUTOR``'s thread."""
     user32 = ctypes.windll.user32
     dwmapi = ctypes.windll.dwmapi
     hwnd = int(source.get("hwnd") or 0)
@@ -1137,7 +1206,6 @@ def _grab_window_thumbnail(source: dict[str, Any]):
                     break
             if image is None or _is_blank(image):
                 raise _SourceMinimized(f"DWM returned no frame for {source.get('label') or hwnd}")
-            _GRAB_STATE.method = "thumbnail"
             return image
         finally:
             dwmapi.DwmUnregisterThumbnail(thumbnail)
@@ -1192,14 +1260,21 @@ def _grab_window(source: dict[str, Any]):
 
 
 def _grab(source: dict[str, Any]):
-    """PIL image of the chosen source: an application window, a display, or a camera."""
+    """PIL image of the chosen source: an application window, a display, or a camera.
+
+    A successful grab is remembered as that source's last frame, which is exactly what a later
+    failed grab falls back to (see _recall_frame) instead of erroring.
+    """
     _GRAB_STATE.waiting = ""  # only the window path can report a non-live frame
     kind = (source or {}).get("kind") or ("window" if (source or {}).get("hwnd") else "monitor")
     if kind == "camera":
-        return _grab_camera(source)
-    if kind == "window":
-        return _grab_window(source)
-    return _grab_monitor(source)
+        img = _grab_camera(source)
+    elif kind == "window":
+        img = _grab_window(source)
+    else:
+        img = _grab_monitor(source)
+    _remember_frame(source, img)
+    return img
 
 
 def _grab_camera(source: dict[str, Any]):
@@ -2570,7 +2645,12 @@ ENGINE = _Engine()
 # pane stages it into the chat input through the app's own paste route — the whole
 # feature is plugin-side (no desktop change, no clipboard takeover).
 SNAP_TTL_S = 120.0  # an idle session this long is gone (its camera must not stay held)
-SNAP_PREVIEW_WIDTH = 960  # the overlay's feed; the SNAP itself is full resolution
+# The overlay's feed: the crop dialog renders up to ~1500 CSS px wide, so a 4K screen's feed is
+# sized to it and never upscaled on the user's display; the SNAP itself stays full resolution.
+SNAP_PREVIEW_WIDTH = 1920
+# A grab that overruns this is stuck (a window that stopped pumping its queue); answer the pane
+# instead of holding its request open. The still-crop path never grabs, so it is unaffected.
+SNAP_GRAB_TIMEOUT_S = 25.0
 SNAP_DIR = STATE_DIR / "snaps"
 
 _SNAP: dict[str, Any] = {
@@ -2697,12 +2777,19 @@ def _snap_frame_payload() -> dict[str, Any]:
     if kind != "camera" and _SNAP.get("still") is not None:
         return _snap_still_payload()  # already captured: same bytes, no device work
     had_camera = _CAM_HANDLE.get("cap") is not None
+    note = ""
     try:
         img = _grab(source)
     except (_SourceGone, _SourceMinimized) as exc:  # waiting states, not failures
-        return {"ok": False, "error": str(exc)[:300], "waiting": True}
+        entry = _recall_frame(source)
+        if entry is None:
+            return {"ok": False, "error": str(exc)[:300], "waiting": True}
+        img, note = entry["img"], _fallback_note(source, entry, str(exc))
     except Exception as exc:  # the pane shows the reason verbatim
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+        entry = _recall_frame(source)
+        if entry is None:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+        img, note = entry["img"], _fallback_note(source, entry, f"{type(exc).__name__}: {exc}")
     if source.get("kind") == "camera" and not had_camera and _CAM_HANDLE.get("cap") is not None:
         _SNAP["opened_camera"] = True  # this session opened the device: it must release it
     _SNAP["frames"] = int(_SNAP.get("frames") or 0) + 1
@@ -2710,9 +2797,16 @@ def _snap_frame_payload() -> dict[str, Any]:
         # The display/window still IS the session's frame: full resolution, kept for the crop.
         _SNAP["still"] = img
         payload = _snap_payload_for(img, still=True)
+        if note:
+            payload["waiting"] = note
+            payload["last_frame"] = True
         _SNAP["still_payload"] = payload
         return payload
-    return _snap_payload_for(img, still=False)
+    payload = _snap_payload_for(img, still=False)
+    if note:
+        payload["waiting"] = note
+        payload["last_frame"] = True
+    return payload
 
 
 def _crop_normalized(img: Any, rect: Any) -> Any:
@@ -2753,8 +2847,16 @@ def _snap_save(rect: Any) -> dict[str, Any]:
     """
     source = _SNAP.get("source") or {}
     img = _SNAP.get("still") if _snap_kind(source) != "camera" else None
+    stale = False
     if img is None:
-        img = _grab(source)
+        try:
+            img = _grab(source)
+        except Exception:  # a live frame that fails falls back to the source's last capture
+            entry = _recall_frame(source)
+            if entry is None:
+                raise
+            img = entry["img"]
+            stale = True
     img = _crop_normalized(img, rect)
     SNAP_DIR.mkdir(parents=True, exist_ok=True)
     name = f"snap-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}.png"
@@ -2763,7 +2865,7 @@ def _snap_save(rect: Any) -> dict[str, Any]:
     tmp = path.with_name(f"{name}.{os.getpid()}.tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
-    return {
+    result = {
         "ok": True,
         "name": name,
         "path": str(path),
@@ -2772,6 +2874,9 @@ def _snap_save(rect: Any) -> dict[str, Any]:
         "bytes": len(data),
         "png_b64": base64.b64encode(data).decode("ascii"),
     }
+    if stale:
+        result["stale"] = True  # the live grab failed; this PNG is the source's last frame
+    return result
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
@@ -3002,7 +3107,11 @@ async def post_snap_start(payload: dict[str, Any] = Body(default={})) -> dict[st
     _SNAP.update(
         {"id": uuid.uuid4().hex[:12], "source": chosen, "at": time.time(), "opened_camera": False, "frames": 0}
     )
-    frame = await asyncio.to_thread(_snap_frame_payload)
+    try:
+        frame = await asyncio.wait_for(asyncio.to_thread(_snap_frame_payload), timeout=SNAP_GRAB_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        _snap_reset()
+        return {"ok": False, "error": "the capture timed out — the source did not return a frame"}
     if not frame.get("ok"):
         _snap_reset()
         return {"ok": False, "error": frame.get("error") or "could not grab a frame"}
@@ -3020,7 +3129,10 @@ async def get_snap_frame(session_id: str = "") -> dict[str, Any]:
     if time.time() - float(_SNAP.get("at") or 0) > SNAP_TTL_S:
         await asyncio.to_thread(_snap_reset)
         return {"ok": False, "error": "snapshot session expired"}
-    return await asyncio.to_thread(_snap_frame_payload)
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_snap_frame_payload), timeout=SNAP_GRAB_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "the capture timed out — the source did not return a frame"}
 
 
 @router.post("/snap")
@@ -3039,7 +3151,9 @@ async def post_snap(payload: dict[str, Any] = Body(default={})) -> dict[str, Any
         await asyncio.to_thread(_snap_reset)
         return {"ok": False, "error": "snapshot session expired"}
     try:
-        return await asyncio.to_thread(_snap_save, payload.get("rect"))
+        return await asyncio.wait_for(asyncio.to_thread(_snap_save, payload.get("rect")), timeout=SNAP_GRAB_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "the capture timed out — the source did not return a frame"}
     except (_SourceGone, _SourceMinimized) as exc:
         return {"ok": False, "error": str(exc)[:300], "waiting": True}
     except Exception as exc:
@@ -3065,31 +3179,45 @@ async def get_preview(width: int = 640, hwnd: int = 0) -> dict[str, Any]:
     """The pane's thumbnail: the frame being watched, or one program on request.
 
     With ``hwnd`` it previews a listed program instead of the watch — that is how the picker shows
-    what each window would actually contribute, including a minimized window's last frame. The watch
-    loop's status is untouched: grab state is per thread.
+    what each window would actually contribute, including a minimized window's last frame (the very
+    DWM surface its taskbar preview shows). When that surface is gone, the program's last captured
+    frame answers instead, flagged ``last_frame``. The watch loop's status is untouched: grab state
+    is per thread.
     """
     method = ENGINE.grab_method
     waiting = ENGINE.waiting
     if hwnd:
 
-        def _capture() -> tuple[Optional[bytes], int, int, str, str, str]:
+        def _capture() -> tuple[Optional[bytes], int, int, str, str, str, bool]:
             source = next((w for w in list_windows() if int(w.get("hwnd") or 0) == int(hwnd)), None)
             if not source:
-                return None, 0, 0, "", "", "that program is no longer open"
+                return None, 0, 0, "", "", "that program is no longer open", False
+            # A minimized window previews as its DWM last frame (the surface taskbar previews show);
+            # when even that is gone, the source's last captured frame answers instead.
+            last = False
+            try:
+                img = _grab(source)
+                note = _grab_waiting()
+            except Exception as exc:
+                entry = _recall_frame(source)
+                if entry is None:
+                    raise
+                img, last = entry["img"], True
+                note = _fallback_note(source, entry, f"{type(exc).__name__}: {exc}")
             # Resize inside the capture thread, at the width the pane asked for: encoding a full-size
             # window PNG only to shrink it on the way out is the bulk of a picker row's cost.
-            shot, out_w, out_h = _wire_jpeg(_grab(source), width)
-            return shot, out_w, out_h, _grab_method(), _grab_waiting(), ""
+            shot, out_w, out_h = _wire_jpeg(img, width)
+            return shot, out_w, out_h, (_grab_method() if not last else "last-frame"), note, "", last
 
         try:
-            shot, out_w, out_h, method, waiting, failure = await asyncio.to_thread(_capture)
+            shot, out_w, out_h, method, waiting, failure, last = await asyncio.to_thread(_capture)
         except (_SourceGone, _SourceMinimized) as exc:
             return {"ok": False, "error": str(exc)}
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         if failure:
             return {"ok": False, "error": failure}
-        return {
+        result = {
             "ok": True,
             "width": out_w,
             "height": out_h,
@@ -3097,6 +3225,9 @@ async def get_preview(width: int = 640, hwnd: int = 0) -> dict[str, Any]:
             "waiting": waiting or None,
             "data_url": "data:image/jpeg;base64," + base64.b64encode(shot).decode("ascii"),
         }
+        if last:
+            result["last_frame"] = True
+        return result
     cached = _preview_get(ENGINE.frame_seq, width)
     if cached is not None:
         return cached

@@ -11,6 +11,7 @@ import asyncio
 import base64
 import importlib.util
 import io
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -349,3 +350,155 @@ def test_a_camera_stays_live_and_its_snap_re_grabs(sandbox, monkeypatch) -> None
     assert grabs.calls == 3, "every camera poll is a fresh frame"
     result = asyncio.run(api.post_snap({"session_id": started["session_id"]}))
     assert result["ok"] is True and grabs.calls == 4, "a camera snap grabs its own fresh frame"
+
+
+# ── the last-frame fallback ──────────────────────────────────────────────────
+
+
+def _window_source(source_id: str = "window-777") -> dict:
+    return {
+        "id": source_id,
+        "label": "Notepad — notes.txt",
+        "kind": "window",
+        "hwnd": 777,
+        "x": 0,
+        "y": 0,
+        "width": 800,
+        "height": 600,
+    }
+
+
+def _clear_frames() -> None:
+    with api._LAST_FRAME_LOCK:
+        api._LAST_FRAMES.clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_frame_cache():
+    _clear_frames()
+    yield
+    _clear_frames()
+
+
+def test_failed_live_grab_falls_back_to_the_last_frame(sandbox, monkeypatch) -> None:
+    src = _window_source()
+    api._remember_frame(src, _frame(320, 120))
+
+    def blank(source):
+        raise RuntimeError("window comes back blank in the background (GPU-composited or hidden)")
+
+    monkeypatch.setattr(api, "_grab", blank)
+    monkeypatch.setattr(api, "_source_from_id", lambda sid: src)
+    started = asyncio.run(api.post_snap_start({"source_id": "window-777"}))
+    assert started["ok"] is True, started
+    frame = started["frame"]
+    assert frame["ok"] is True and frame.get("last_frame") is True
+    assert "last frame captured" in (frame.get("waiting") or "")
+    assert (frame["width"], frame["height"]) == (320, 120), "the feed shows the remembered frame"
+    saved = asyncio.run(
+        api.post_snap({"session_id": started["session_id"], "rect": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5}})
+    )
+    assert saved["ok"] is True and (saved["width"], saved["height"]) == (160, 60)
+    assert "stale" not in saved, "the still came from the session, not a fresh fallback grab"
+
+
+def test_minimized_wait_state_also_uses_the_last_frame(sandbox, monkeypatch) -> None:
+    src = _window_source()
+    api._remember_frame(src, _frame(64, 48))
+
+    def gone(source):
+        raise api._SourceMinimized("DWM returned no frame for Notepad")
+
+    monkeypatch.setattr(api, "_grab", gone)
+    monkeypatch.setattr(api, "_source_from_id", lambda sid: src)
+    started = asyncio.run(api.post_snap_start({"source_id": "window-777"}))
+    assert started["ok"] is True
+    assert started["frame"].get("last_frame") is True
+    assert "DWM returned no frame" in started["frame"]["waiting"]
+
+
+def test_without_a_last_frame_the_original_error_stands(sandbox, monkeypatch) -> None:
+    src = _window_source()
+    monkeypatch.setattr(api, "_source_from_id", lambda sid: src)
+
+    def blank(source):
+        raise RuntimeError("window comes back blank")
+
+    monkeypatch.setattr(api, "_grab", blank)
+    started = asyncio.run(api.post_snap_start({"source_id": "window-777"}))
+    assert started["ok"] is False and "blank" in started["error"]
+
+
+def test_camera_save_falls_back_and_flags_stale(sandbox, monkeypatch) -> None:
+    src = _camera(1)
+    api._remember_frame(src, _frame(64, 48))
+    monkeypatch.setattr(api, "_source_from_id", lambda sid: src)
+    monkeypatch.setattr(api, "_grab", lambda source: _frame())
+    started = asyncio.run(api.post_snap_start({"source_id": "camera-1"}))
+    assert started["ok"] is True
+
+    def dead(source):
+        raise RuntimeError("camera 1 returned no frame")
+
+    monkeypatch.setattr(api, "_grab", dead)
+    saved = asyncio.run(api.post_snap({"session_id": started["session_id"]}))
+    assert saved["ok"] is True and saved.get("stale") is True
+    assert (saved["width"], saved["height"]) == (64, 48), "the PNG is the remembered frame"
+
+
+def test_frames_remembered_per_source_with_a_cap() -> None:
+    a, b = _window_source("window-1"), _window_source("window-2")
+    api._remember_frame(a, _frame(10, 10))
+    api._remember_frame(a, _frame(20, 20))  # newest wins for the same source
+    api._remember_frame(b, _frame(30, 30))
+    got = api._recall_frame(a)
+    assert got is not None and got["img"].size == (20, 20)
+    assert api._recall_frame(_window_source("window-3")) is None
+    for i in range(api._LAST_FRAMES_MAX + 3):
+        api._remember_frame(_window_source(f"window-{i}"), _frame(5, 5))
+    with api._LAST_FRAME_LOCK:
+        assert len(api._LAST_FRAMES) == api._LAST_FRAMES_MAX, "the cache is bounded"
+
+
+def test_thumbnail_captures_run_on_their_own_thread(monkeypatch) -> None:
+    seen = {}
+
+    def capture(source):
+        seen["thread"] = threading.current_thread().name
+        return _frame(12, 12)
+
+    monkeypatch.setattr(api, "_thumb_capture", capture)
+    img = api._grab_window_thumbnail(
+        {"kind": "window", "hwnd": 5, "label": "x", "x": 0, "y": 0, "width": 10, "height": 10}
+    )
+    assert img.size == (12, 12)
+    assert seen["thread"].startswith("pv-thumb"), "the host window's thread owns every capture"
+    assert api._grab_method() == "thumbnail", "the grab state lands on the caller's thread-local"
+
+
+def test_preview_falls_back_to_the_last_frame(sandbox, monkeypatch) -> None:
+    src = _window_source("window-777")
+    api._remember_frame(src, _frame(64, 48))
+    monkeypatch.setattr(api, "list_windows", lambda: [src])
+
+    def gone(source):
+        raise api._SourceMinimized("DWM returned no frame for Notepad")
+
+    monkeypatch.setattr(api, "_grab", gone)
+    got = asyncio.run(api.get_preview(width=64, hwnd=777))
+    assert got["ok"] is True and got.get("last_frame") is True
+    assert got["data_url"].startswith("data:image/jpeg;base64,")
+    assert "last frame captured" in (got.get("waiting") or "")
+    assert got["method"] == "last-frame"
+
+
+def test_preview_without_a_last_frame_reports_the_reason(sandbox, monkeypatch) -> None:
+    src = _window_source("window-777")
+    monkeypatch.setattr(api, "list_windows", lambda: [src])
+
+    def gone(source):
+        raise api._SourceMinimized("DWM returned no frame for Notepad")
+
+    monkeypatch.setattr(api, "_grab", gone)
+    got = asyncio.run(api.get_preview(width=64, hwnd=777))
+    assert got["ok"] is False and "no frame" in got["error"]

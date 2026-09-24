@@ -102,7 +102,7 @@ choose a display, window, or camera in the desktop pane. The pane shows:
 4. **Vision candidates** — model suggestions based on intake size
 5. **Pin button** — lock a specific vision model for the session
 6. **Inject picker** ("Rides your turns") — when fresh readings are shared; see [Injection modes](#injection-modes)
-7. **Blink rate** — how often the watch checks for changes; on **manual** it also shows the **Snapshot** buttons at the right of the same line; see [Manual snapshots](#manual-snapshots)
+7. **Blink rate** — how often the watch checks for changes; on **manual** it also shows the **Snapshot** buttons beside its picker on the same line; see [Manual snapshots](#manual-snapshots)
 8. **Status** — live status of the capture engine, frame count, source info
 
 Once a source is selected, descriptions are injected into Hermes context before a response,
@@ -139,7 +139,7 @@ would save nothing.
 ### Manual snapshots
 
 Set **"Blink rate"** to **manual** and the watch stops checking on its own — nothing is
-described until you snapshot — while a **Snapshot** pair appears at the right of that same
+described until you snapshot — while a **Snapshot** pair appears beside the picker on that same
 line: one button with a camera icon (a camera frame) and one with a screen-crop icon
 (a screenshot). Each button
 first pops the matching source list — cameras for the camera button; displays and application
@@ -147,7 +147,11 @@ windows for the screen button — and picking a source opens a live view where y
 area to keep. Snapping crops at the source's full resolution, saves a PNG under the plugin's
 state directory (`snaps/`), and stages it into the chat **message input**, ready to send like
 any other image. No drag? The whole frame is taken. Switching back to a rhythm hides it
-again, and either pick is applied to a running watch without a restart.
+again, and either pick is applied to a running watch without a restart. The crop view is fed at
+up to 1920 px wide while the crop itself is cut from the full-resolution capture, so the image
+that reaches the input stays sharp from a 4K display; and if a live capture fails — a minimized
+window whose surface has gone blank, a camera that hands out no frame — the snapshot answers
+with the **last frame captured** for that source, labelled with its age.
 
 ## Security & Privacy
 

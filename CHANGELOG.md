@@ -25,6 +25,14 @@ All notable changes to this plugin. Nothing before the first public release was 
   capture replayed, so the saved crop is exactly the region you dragged, at full detail — and a
   new **Retake** button re-captures in place. Display sessions open in a wide dialog: the still
   is the whole screen. Camera snapshots stay live, unchanged.
+- **Snapshot captures hold their resolution and their fallback.** The crop view's feed renders
+  at up to 1920 px wide (the dialog never upscales it on a 4K screen); a live capture that fails
+  — a minimized window whose DWM surface came back blank, a camera that hands out no frame —
+  serves the **last frame captured** for that source — the picker rows, the crop
+  feed, and the saved snap alike — labelled with its age; a grab that stalls
+  behind a window that stopped pumping its queue times out with an answer instead of holding the
+  pane, and minimized-window thumbnail captures run on the one thread that owns their helper
+  window, so one stalled capture can never hold back the next.
 
 ## [1.3.0] - 2026-09-23
 
