@@ -524,6 +524,23 @@ class LinuxCapture:
         """
         windows: list[dict] = []
 
+        # Wayland FIRST: wmctrl/xwininfo enumerate the Xwayland subtree only —
+        # they "succeed" with a junk list (mutter's guard window, any stray X11
+        # client) that shadows the real toplevels, so AT-SPI (the desktop's
+        # unconditional answer on GNOME) must be tried before them. X11 sessions
+        # skip this and go straight to wmctrl below, where AT-SPI is optional.
+        if _is_wayland():
+            rows = _windows_from_atspi(_run_atspi() or "")
+            windows = [
+                self._window(
+                    hwnd=row["pid"], pid=row["pid"], title=row["title"],
+                    x=row["x"], y=row["y"], width=row["width"], height=row["height"],
+                )
+                for row in rows
+            ]
+            if windows:
+                return windows
+
         # X11 enumeration — this also reaches Xwayland clients under a Wayland
         # session once the display auth cookie is supplied.
         try:
