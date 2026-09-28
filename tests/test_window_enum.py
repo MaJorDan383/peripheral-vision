@@ -127,7 +127,13 @@ def install(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(api, "_window_rect", lambda h: (0, 0, 640, 480))
         monkeypatch.setattr(api, "_restored_rect", lambda h: None)
         monkeypatch.setattr(api, "_window_exe", lambda pid: "app.exe")
-        monkeypatch.setattr(api, "_THUMB_HOST", {"hwnd": 0, "size": (0, 0)})
+        # Patch shared_state directly — capture_windows reads from it at call time
+        monkeypatch.setattr("shared_state.THUMB_HOST", {"hwnd": 0, "size": (0, 0)})
+        # Also patch capture_windows helpers directly so test's fake user32 gets called
+        monkeypatch.setattr("capture_windows._is_cloaked", lambda h: False)
+        monkeypatch.setattr("capture_windows._window_rect", lambda h: (0, 0, 640, 480))
+        monkeypatch.setattr("capture_windows._restored_rect", lambda h: None)
+        monkeypatch.setattr("capture_windows._window_exe", lambda pid: "app.exe")
         return fake
 
     return _install
@@ -164,7 +170,9 @@ def test_own_windows_are_skipped_before_any_title_call(install) -> None:
 def test_the_thumbnail_host_is_skipped_even_when_the_pid_filter_would_pass(install) -> None:
     """The host is skipped by its handle too, independent of who owns it."""
     fake = install([_Win(HOST_HWND, 424242, " "), _Win(FOREIGN_HWND, 424242, "Notepad")])
-    api._THUMB_HOST.update({"hwnd": HOST_HWND, "size": (160, 90)})
+    # Update shared_state directly — capture_windows reads from it
+    import shared_state
+    shared_state.THUMB_HOST.update({"hwnd": HOST_HWND, "size": (160, 90)})
 
     result = api.list_windows()
 
@@ -187,3 +195,60 @@ def test_invisible_and_own_windows_together_yield_no_title_calls_at_all(install)
     assert ("GetWindowThreadProcessId", FOREIGN_HWND) not in fake.calls, (
         "an invisible window was probed further than its visibility"
     )
+
+
+def _module_level_defs(path: Path) -> dict:
+    """Name -> count of top-level ``def``s in a source file."""
+    counts: dict = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("def "):
+            name = line[4:].split("(")[0]
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def test_no_shadowing_duplicate_defs():
+    """A later ``def`` silently wins, so a duplicate is always a bug.
+
+    capture_windows.py once shipped trailing ``_window_exe``/``_restored_rect``
+    stubs that re-imported the same module's name — resolving to themselves and
+    recursing. The RecursionError was swallowed inside the EnumWindows callback,
+    so every window was skipped and enumeration returned [] with no error.
+    """
+    for backend in ("capture_windows.py", "capture_linux.py"):
+        counts = _module_level_defs(PLUGIN_DIR / "dashboard" / backend)
+        dupes = {name: n for name, n in counts.items() if n > 1}
+        assert not dupes, f"{backend} redefines {dupes}; the later def shadows the real one"
+
+
+def test_window_exe_never_recurses():
+    """The exe lookup runs inside the enumeration callback; a RecursionError there
+    empties the whole list."""
+    import capture_windows as cw
+
+    # _window_exe is not monkeypatched here — this is the real code path.
+    result = cw._window_exe(0)
+    assert isinstance(result, str)
+
+
+def test_real_enumeration_is_not_silently_empty():
+    """An empty list is legitimate (no windows), but it must not be the symptom
+    of an exception swallowed inside the callback."""
+    import capture_windows as cw
+
+    errors = []
+    original = cw._window_exe
+
+    def spy(pid):
+        try:
+            return original(pid)
+        except BaseException as exc:  # pragma: no cover - the bug we guard against
+            errors.append(repr(exc))
+            return ""
+
+    cw._window_exe = spy
+    try:
+        cw.list_windows()
+    finally:
+        cw._window_exe = original
+    assert not errors, f"the exe lookup threw inside enumeration: {errors}"

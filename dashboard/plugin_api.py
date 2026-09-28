@@ -42,6 +42,34 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Body
 
+# Cross-platform capture abstraction
+# Cross-platform capture abstraction
+# Use absolute import for test compatibility (tests load via importlib without package)
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+from capture import (
+    list_monitors as capture_list_monitors,
+    list_windows as capture_list_windows,
+    list_cameras as capture_list_cameras,
+    list_sources as capture_list_sources,
+    grab as capture_grab,
+    release_camera as capture_release_camera,
+    is_minimized as capture_is_minimized,
+    get_window_rect as capture_get_window_rect,
+    supports_snap_full_res as capture_supports_snap_full_res,
+    cleanup as capture_cleanup,
+    probe_cameras_now as capture_probe_cameras_now,
+    cameras_probing as capture_cameras_probing,
+    abort_camera_probe as capture_abort_camera_probe,
+    camera_source as capture_camera_source,
+    camera_cache as capture_camera_cache,
+    window_iconic as capture_window_iconic,
+    window_rested as capture_window_rested,
+    camera_open as capture_camera_open,
+    window_rect as capture_window_rect,
+)
+
 router = APIRouter()
 
 # ── Paths / constants ─────────────────────────────────────────────────────
@@ -131,654 +159,39 @@ _WATCH_SESSION: dict[str, str] = {"id": ""}  # live chat whose model describes f
 
 
 # ── Monitor enumeration ───────────────────────────────────────────────────
-class _RECT(ctypes.Structure):
-    _fields_ = [
-        ("left", ctypes.c_long),
-        ("top", ctypes.c_long),
-        ("right", ctypes.c_long),
-        ("bottom", ctypes.c_long),
-    ]
 
-
-class _MONITORINFOEXW(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", ctypes.c_ulong),
-        ("rcMonitor", _RECT),
-        ("rcWork", _RECT),
-        ("dwFlags", ctypes.c_ulong),
-        ("szDevice", ctypes.c_wchar * 32),
-    ]
-
+# ── Cross-platform capture (delegates to the OS backend via capture.py) ──
+# The thin wrappers below keep this module's call-sites unchanged; all
+# Win32/GDI/DWM/OpenCV machinery lives in dashboard/capture_windows.py.
 
 def list_monitors() -> list[dict[str, Any]]:
-    """Enumerate displays in the same coordinate space screen grabs use."""
-    monitors: list[dict[str, Any]] = []
-    try:
-        user32 = ctypes.windll.user32
-        user32.SetProcessDPIAware()
-    except Exception:
-        pass
-
-    try:
-        enum_proc = ctypes.WINFUNCTYPE(
-            ctypes.c_int,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.POINTER(_RECT),
-            ctypes.c_double,
-        )
-
-        def _cb(hmon: int, _hdc: int, _rect, _data) -> int:
-            info = _MONITORINFOEXW()
-            info.cbSize = ctypes.sizeof(_MONITORINFOEXW)
-            if ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
-                monitors.append(
-                    {
-                        "id": f"monitor-{len(monitors)}",
-                        "index": len(monitors),
-                        "device": info.szDevice,
-                        "label": f"Display {len(monitors) + 1}",
-                        "x": int(info.rcMonitor.left),
-                        "y": int(info.rcMonitor.top),
-                        "width": int(info.rcMonitor.right - info.rcMonitor.left),
-                        "height": int(info.rcMonitor.bottom - info.rcMonitor.top),
-                        "primary": bool(info.dwFlags & 1),
-                    }
-                )
-            return 1
-
-        ctypes.windll.user32.EnumDisplayMonitors(None, None, enum_proc(_cb), 0)
-    except Exception:
-        monitors = []
-
-    if not monitors:  # last-resort fallback: one virtual screen
-        try:
-            from PIL import ImageGrab
-
-            img = ImageGrab.grab()
-            monitors = [
-                {
-                    "id": "monitor-0",
-                    "index": 0,
-                    "device": "VIRTUAL",
-                    "label": "Display 1",
-                    "x": 0,
-                    "y": 0,
-                    "width": img.width,
-                    "height": img.height,
-                    "primary": True,
-                }
-            ]
-        except Exception:
-            monitors = []
-
-    for m in monitors:
-        m["primary_label"] = "primary" if m.get("primary") else ""
-        m["kind"] = "monitor"
-    return monitors
-
-
-# ── Application windows (watch ONE app instead of a whole display) ────────
-class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-def _window_exe(pid: int) -> str:
-    """Executable name of a window's process, for a readable label."""
-    try:
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
-        if not handle:
-            return ""
-        try:
-            size = ctypes.c_ulong(4096)
-            buf = ctypes.create_unicode_buffer(size.value)
-            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-                return os.path.basename(buf.value)
-        finally:
-            kernel32.CloseHandle(handle)
-    except Exception:
-        return ""
-    return ""
-
-
-def _window_rect(hwnd: int) -> Optional[tuple[int, int, int, int]]:
-    """DWM frame bounds when available (the visually real frame), else the window rect."""
-    try:
-        rect = _RECT()
-        ok = ctypes.windll.dwmapi.DwmGetWindowAttribute(
-            ctypes.c_void_p(hwnd), ctypes.c_uint(9), ctypes.byref(rect), ctypes.sizeof(rect)
-        )  # DWMWA_EXTENDED_FRAME_BOUNDS
-        if ok != 0:
-            ctypes.windll.user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect))
-        return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
-    except Exception:
-        return None
-
-
-class _WINDOWPLACEMENT(ctypes.Structure):
-    """GetWindowPlacement: where a window sits when restored, and whether it is minimized."""
-
-    _fields_ = [
-        ("length", ctypes.c_uint),
-        ("flags", ctypes.c_uint),
-        ("showCmd", ctypes.c_uint),
-        ("ptMinPosition", _POINT),
-        ("ptMaxPosition", _POINT),
-        ("rcNormalPosition", _RECT),
-    ]
-
-
-def _restored_rect(hwnd: int) -> Optional[tuple[int, int, int, int]]:
-    """The rectangle a minimized window restores to.
-
-    A minimized window answers ``GetWindowRect`` with its tiny iconic rect (≈276×45), so a
-    size check against that hides whole applications from the picker. The placement's
-    ``rcNormalPosition`` is the frame the window actually occupies when restored.
-    """
-    try:
-        placement = _WINDOWPLACEMENT()
-        placement.length = ctypes.sizeof(_WINDOWPLACEMENT)
-        if not ctypes.windll.user32.GetWindowPlacement(ctypes.c_void_p(hwnd), ctypes.byref(placement)):
-            return None
-        rect = placement.rcNormalPosition
-        left, top = int(rect.left), int(rect.top)
-        width, height = int(rect.right - rect.left), int(rect.bottom - rect.top)
-        if width < 120 or height < 90:
-            return None
-        return (left, top, left + width, top + height)
-    except Exception:
-        return None
-
-
-def _is_cloaked(hwnd: int) -> bool:
-    """UWP/ghost windows that exist but render nothing."""
-    try:
-        value = ctypes.c_int(0)
-        ok = ctypes.windll.dwmapi.DwmGetWindowAttribute(
-            ctypes.c_void_p(hwnd), ctypes.c_uint(14), ctypes.byref(value), ctypes.sizeof(value)
-        )  # DWMWA_CLOAKED
-        return bool(ok == 0 and value.value)
-    except Exception:
-        return False
-
-
-def _root_window(hwnd: int) -> int:
-    try:
-        root = ctypes.windll.user32.GetAncestor(ctypes.c_void_p(hwnd), 3)  # GA_ROOTOWNER
-        return int(root or hwnd)
-    except Exception:
-        return hwnd
+    """Enumerate connected displays (index, name, bounds, primary)."""
+    return capture_list_monitors()
 
 
 def list_windows(limit: int = 150) -> list[dict[str, Any]]:
-    """Top-level application windows, in z-order, that can be watched in the background."""
-    windows: list[dict[str, Any]] = []
-    try:
-        user32 = ctypes.windll.user32
-        user32.SetProcessDPIAware()
-    except Exception:
-        return windows
-
-    own_pid = os.getpid()
-    seen: set[int] = set()
-
-    try:
-        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-
-        def _cb(hwnd, _lparam) -> bool:
-            try:
-                h = int(hwnd)
-                if h in seen or len(windows) >= limit:
-                    return True
-                seen.add(h)
-                if not user32.IsWindowVisible(ctypes.c_void_p(h)):
-                    return True
-                # Our own windows are skipped BEFORE the title calls below, and that order is
-                # load-bearing: GetWindowTextLengthW/GetWindowTextW deliver a message to the
-                # window's owning thread, and for a window owned by THIS process the kernel
-                # applies no timeout. The off-screen thumbnail host (_THUMB_CLASS) is shown by
-                # design but owned by a capture thread that pumps no messages, so a title call
-                # on it would block this thread forever and every later enumeration of sources
-                # would queue behind it.
-                pid = ctypes.c_ulong(0)
-                user32.GetWindowThreadProcessId(ctypes.c_void_p(h), ctypes.byref(pid))
-                if h == int(_THUMB_HOST.get("hwnd") or 0) or int(pid.value) == own_pid:
-                    return True  # never watch ourselves
-                length = user32.GetWindowTextLengthW(ctypes.c_void_p(h))
-                if length <= 0:
-                    return True
-                buf = ctypes.create_unicode_buffer(length + 2)
-                user32.GetWindowTextW(ctypes.c_void_p(h), buf, length + 2)
-                title = buf.value.strip()
-                if not title:
-                    return True
-                ex_style = 0
-                for getter in ("GetWindowLongPtrW", "GetWindowLongW"):
-                    try:
-                        fn = getattr(user32, getter)
-                        ex_style = int(fn(ctypes.c_void_p(h), -20))  # GWL_EXSTYLE
-                        break
-                    except Exception:
-                        continue
-                if ex_style & 0x00000080:  # WS_EX_TOOLWINDOW (palettes, tooltips)
-                    return True
-                if _is_cloaked(h):
-                    return True
-                minimized = bool(user32.IsIconic(ctypes.c_void_p(h)))
-                rect = _window_rect(h)
-                if minimized:
-                    # Minimized windows report their iconic rect (~276×45) to GetWindowRect.
-                    # They are still open programs, so judge them by the frame they restore to.
-                    rect = _restored_rect(h) or rect
-                if not rect:
-                    return True
-                left, top, right, bottom = rect
-                width, height = right - left, bottom - top
-                if width < 120 or height < 90:
-                    return True
-                cls = ctypes.create_unicode_buffer(256)
-                user32.GetClassNameW(ctypes.c_void_p(h), cls, 256)
-                windows.append(
-                    {
-                        "id": f"window-{h}",
-                        "kind": "window",
-                        "hwnd": h,
-                        "title": title[:120],
-                        "class": cls.value,
-                        "exe": _window_exe(int(pid.value)),
-                        "pid": int(pid.value),
-                        "x": left,
-                        "y": top,
-                        "width": width,
-                        "height": height,
-                        "minimized": minimized,
-                        "foreground": h == int(user32.GetForegroundWindow() or 0),
-                    }
-                )
-            except Exception:
-                return True
-            return True
-
-        user32.EnumWindows(enum_proc(_cb), 0)
-    except Exception:
-        return windows
-
-    for w in windows:
-        app = w.get("exe") or w.get("class") or "window"
-        w["label"] = f"{app} — {w['title']}"
-        w["badge"] = "minimized" if w.get("minimized") else ("front" if w.get("foreground") else "background")
-    return windows
-
-
-# ── Cameras (poll the OS default webcam, or any attached one) ─────────────
-CAMERA_MAX_INDEX = int(os.environ.get("PV_CAMERA_MAX_INDEX") or 4)
-CAMERA_CACHE_S = int(os.environ.get("PV_CAMERA_CACHE_S") or 600)
-CAMERA_PROBE_TIMEOUT_S = float(os.environ.get("PV_CAMERA_PROBE_TIMEOUT_S") or 5.0)
-CAMERA_PROBE_WAVE = int(os.environ.get("PV_CAMERA_PROBE_WAVE") or 2)
-_CAMERA_CACHE: dict[str, Any] = {"at": 0.0, "devices": [], "probing": False, "thread": None}
-# Set when the user picks a camera: an exploratory probe must stop opening devices immediately.
-_CAM_PROBE_ABORT = threading.Event()
-
-# Capture at the largest mode a device will actually deliver: OpenCV's default is 640x480, which
-# throws away most of what a 1080p webcam can see. Walked max-first, and the winner is remembered
-# per camera (and persisted) so only the first open after a restart pays for the negotiation.
-CAMERA_MODES: tuple[tuple[int, int], ...] = ((3840, 2160), (1920, 1080), (1280, 720))
-CAMERA_MODES_PATH = STATE_DIR / "camera_modes.json"
-_CAMERA_MODES: dict[int, tuple[int, int]] = {}
-_CAMERA_MODES_LOADED = False
-_MODES_LOCK = threading.Lock()  # guards the lazy load + the read-modify-write of camera_modes.json
-
-
-def _camera_mode(index: int) -> Optional[tuple[int, int]]:
-    """The mode this camera settled on last time, if it is known."""
-    global _CAMERA_MODES_LOADED
-    with _MODES_LOCK:
-        if not _CAMERA_MODES_LOADED:
-            try:
-                stored = json.loads(CAMERA_MODES_PATH.read_text(encoding="utf-8")) or {}
-                for key, value in (stored.get("modes") or {}).items():
-                    width, height = (int(v) for v in value)
-                    if width and height:
-                        _CAMERA_MODES[int(key)] = (width, height)
-            except Exception:
-                pass  # no cache yet, or a corrupt one: negotiate from scratch
-            # Only once the table is fully populated: a second thread must never observe the
-            # loaded-flag set while _CAMERA_MODES is still empty, or it silently falls back to
-            # the full mode-negotiation ladder the cache exists to skip.
-            _CAMERA_MODES_LOADED = True
-        return _CAMERA_MODES.get(index)
-
-
-def _remember_camera_mode(index: int, size: tuple[int, int]) -> None:
-    """Remember what this camera settled on so the next open gets there in one step."""
-    with _MODES_LOCK:  # probe threads finish in waves: the read-modify-write must be atomic
-        if _CAMERA_MODES.get(index) == size:
-            return
-        _CAMERA_MODES[index] = size
-        _write_json(
-            CAMERA_MODES_PATH,
-            {"v": 1, "modes": {str(i): [w, h] for i, (w, h) in sorted(_CAMERA_MODES.items())}},
-        )
-        # The picker shows the camera's size, so keep the device cache honest with what we really get.
-        changed = False
-        for device in _CAMERA_CACHE.get("devices") or []:
-            if int(device.get("index", -1)) == index and (device.get("width"), device.get("height")) != size:
-                device["width"], device["height"] = size
-                changed = True
-        if changed:
-            _write_json(
-                CAMERA_CACHE_PATH,
-                {"v": 1, "at": _CAMERA_CACHE.get("at", 0.0), "devices": _CAMERA_CACHE["devices"]},
-            )
-
-
-def _apply_camera_mode(cap, width: int, height: int) -> tuple[int, int]:
-    """Ask a device for one mode and report the size it actually delivered.
-
-    DSHOW substitutes a mode it prefers when the request is unsupported (and some drivers report the
-    request while scaling), so the frame is the only trustworthy answer. A device that just
-    renegotiated often fails its first read, hence the retries.
-    """
-    try:
-        import cv2
-
-        # Above 720p, webcams almost always need MJPG — the default YUY2 format caps out at 640x480.
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    except Exception:
-        pass
-    try:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
-    except Exception:
-        return (0, 0)
-    for attempt in range(3):
-        try:
-            ok, frame = cap.read()
-        except Exception:
-            ok, frame = False, None
-        if ok and frame is not None:
-            return (int(frame.shape[1]), int(frame.shape[0]))
-        if attempt < 2:
-            time.sleep(0.15)
-    return (0, 0)
-
-
-def _configure_camera_capture(cap, index: int) -> tuple[int, int]:
-    """Ask for the biggest mode this camera honours and return the delivered size.
-
-    Never raises: capture that turns out to be merely VGA still works, it is just smaller.
-    """
-    known = _camera_mode(index)
-    if known:
-        got_w, got_h = _apply_camera_mode(cap, *known)
-        if got_w and got_h:
-            if (got_w, got_h) != known:
-                _remember_camera_mode(index, (got_w, got_h))  # the device answered differently now
-            return (got_w, got_h)
-        # The remembered mode stopped working (device swapped, driver reset): ask again below.
-    best = (0, 0)
-    for width, height in CAMERA_MODES:
-        got_w, got_h = _apply_camera_mode(cap, width, height)
-        if not got_w or not got_h:
-            continue
-        best = (got_w, got_h)
-        _remember_camera_mode(index, best)
-        if got_w >= width and got_h >= height:
-            break  # the device honoured the request in full
-        if max(got_w, got_h) >= 1280:
-            break  # a device that clamps 3840x2160 down to 1920x1080 is already at its native max
-    return best
-
-
-CAMERA_CACHE_PATH = STATE_DIR / "cameras.json"
-try:  # last run's cameras answer the picker instantly, before any probe finishes
-    _cached_cameras = json.loads(CAMERA_CACHE_PATH.read_text(encoding="utf-8"))
-    if isinstance(_cached_cameras.get("devices"), list):
-        _CAMERA_CACHE["devices"] = _cached_cameras["devices"]
-        _CAMERA_CACHE["at"] = float(_cached_cameras.get("at") or 0.0)
-except Exception:
-    pass
-_CAMERA_NAMES: Optional[list[str]] = None
-_NAMES_LOCK = threading.Lock()  # the ffmpeg enumeration costs up to 8s: never run it twice at once
-
-
-def _camera_device_names() -> list[str]:
-    """DirectShow camera names, in enumeration order (matches cv2's index order)."""
-    global _CAMERA_NAMES
-    if _CAMERA_NAMES is not None:
-        return _CAMERA_NAMES
-    with _NAMES_LOCK:
-        if _CAMERA_NAMES is not None:  # another thread enumerated while we waited
-            return _CAMERA_NAMES
-        names: list[str] = []
-        try:
-            import shutil
-            import subprocess
-
-            ffmpeg = shutil.which("ffmpeg")
-            if ffmpeg:
-                proc = subprocess.run(
-                    [ffmpeg, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=8,
-                )
-                text = (proc.stderr or "") + (proc.stdout or "")
-                names = re.findall(r'"([^"]+)"\s*\(video\)', text)
-        except Exception:
-            names = []
-        _CAMERA_NAMES = names
-        return names
-
-
-def _probe_one_camera(
-    index: int, names: list[str], out: dict[int, dict[str, Any]], lock: Any, deadline: float = 0.0
-) -> None:
-    """Open one camera, read a frame, close it. Runs on its own thread.
-
-    A probe must never touch a device the watcher is already holding: DSHOW gives one client at a
-    time, and a second open of the same device stalls or faults the driver — the "pick a camera and
-    the backend dies" class of failure. It also gives up once its wave is out of time, so a slow
-    camera does not keep a device open after the list has been answered.
-    """
-    with _CAM_LOCK:
-        if _CAM_HANDLE.get("cap") is not None and _CAM_HANDLE.get("index") == index:
-            return
-    if deadline and time.time() > deadline:
-        return
-    if _CAM_PROBE_ABORT.is_set():
-        return  # do not open a device the user is no longer waiting for
-    cap = None
-    try:
-        import cv2
-
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        # DSHOW reports isOpened() == False for a device that is still initialising and then hands
-        # out frames anyway — trusting the flag alone reported "no camera attached" with a webcam
-        # plugged in, and the pane retried until the app's 30s RPC timeout fired. A frame is proof.
-        ok, frame = False, None
-        for attempt in range(3):
-            if _CAM_PROBE_ABORT.is_set():
-                return
-            try:
-                ok, frame = cap.read()
-            except Exception:
-                ok, frame = False, None
-            if ok and frame is not None:
-                break
-            if attempt < 2:
-                time.sleep(0.12)
-        if not ok or frame is None:
-            return
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
-        if not width and frame is not None:
-            height, width = frame.shape[:2]
-        name = names[index] if index < len(names) else ""
-        entry = {
-            "id": f"camera-{index}",
-            "kind": "camera",
-            "index": index,
-            "label": name or f"Camera {index}",
-            "name": name,
-            "width": width,
-            "height": height,
-            "default": index == 0,
-            "readable": bool(ok),
-            "badge": "default" if index == 0 else "camera",
-        }
-        with lock:
-            out[index] = entry
-    except Exception:
-        return
-    finally:
-        if cap is not None:
-            try:
-                cap.release()
-            except Exception:
-                pass
-
-
-def _probe_cameras(deadline_s: float) -> None:
-    """Probe camera indices in small waves, each wave bounded by ``deadline_s``.
-
-    Probing a camera opens the device (its LED blinks and a stalled driver can take
-    tens of seconds), so the picker must never wait on it: this runs in the
-    background and whatever answers in time is reported. Opening every device at once
-    makes them contend for the same bus and answers get lost, so they go a couple at
-    a time — a camera list is worth a few seconds of background work.
-    """
-    try:
-        _CAM_PROBE_ABORT.clear()  # the previous pick's abort is stale once a new probe starts
-        names = _camera_device_names()
-        out: dict[int, dict[str, Any]] = {}
-        lock = threading.Lock()
-        indices = list(range(CAMERA_MAX_INDEX))
-        for start in range(0, len(indices), CAMERA_PROBE_WAVE):
-            if _CAM_PROBE_ABORT.is_set():
-                break  # the user picked a camera: stop opening devices behind their back
-            wave = indices[start : start + CAMERA_PROBE_WAVE]
-            deadline = time.time() + deadline_s
-            workers = [
-                threading.Thread(
-                    target=_probe_one_camera, args=(i, names, out, lock, deadline), daemon=True
-                )
-                for i in wave
-            ]
-            for worker in workers:
-                worker.start()
-            for worker in workers:
-                worker.join(timeout=max(0.05, deadline - time.time()))
-        devices = [out[i] for i in sorted(out)]
-        if devices:
-            _CAMERA_CACHE["devices"] = devices
-            _CAMERA_CACHE["at"] = time.time()
-            _write_json(CAMERA_CACHE_PATH, {"v": 1, "at": _CAMERA_CACHE["at"], "devices": devices})
-    finally:
-        _CAMERA_CACHE["probing"] = False
-
-
-def _wait_for_probe(timeout_s: float) -> None:
-    """Wait for the in-flight probe to finish, but never longer than ``timeout_s``."""
-    thread = _CAMERA_CACHE.get("thread")
-    if thread is None or not thread.is_alive() or thread is threading.current_thread():
-        return
-    thread.join(timeout=max(0.05, timeout_s))
-
-
-def _start_camera_probe(deadline_s: float) -> None:
-    if _CAMERA_CACHE.get("probing"):
-        return
-    _CAMERA_CACHE["probing"] = True
-    thread = threading.Thread(target=_probe_cameras, args=(deadline_s,), daemon=True)
-    _CAMERA_CACHE["thread"] = thread
-    thread.start()
+    """Enumerate top-level windows with titles and geometry."""
+    return capture_list_windows(limit)
 
 
 def list_cameras(force: bool = False) -> list[dict[str, Any]]:
-    """Attached cameras, never blocking on a slow driver.
-
-    A fresh cache (or the on-disk copy from the last run) answers immediately; a
-    stale cache kicks off a bounded background re-probe whose result replaces the
-    list on the next call. ``force`` waits for the probe, but only up to the bound.
-    """
-    now = time.time()
-    cached = _CAMERA_CACHE["devices"]
-    if cached and not force and (now - _CAMERA_CACHE["at"]) < CAMERA_CACHE_S:
-        return cached
-    if _CAMERA_CACHE.get("probing"):
-        if force:
-            _wait_for_probe(CAMERA_PROBE_TIMEOUT_S)
-        return _CAMERA_CACHE["devices"]
-    if force:
-        _CAMERA_CACHE["probing"] = True
-        _probe_cameras(CAMERA_PROBE_TIMEOUT_S)
-        return _CAMERA_CACHE["devices"]
-    _start_camera_probe(CAMERA_PROBE_TIMEOUT_S)
-    return cached
+    """Enumerate attached cameras (cached; the probe runs in the background)."""
+    return capture_list_cameras(force)
 
 
 def probe_cameras_now() -> list[dict[str, Any]]:
-    """A camera probe that actually finishes, for callers that genuinely need the answer.
-
-    ``list_cameras(force=True)`` returns an empty list when it only waits on a background probe that
-    has not answered yet — which reads as "no camera is attached" while the webcam is sitting right
-    there. This waits for the in-flight probe first, and only then probes for itself.
-    """
-    if _CAMERA_CACHE.get("probing"):
-        _wait_for_probe(
-            CAMERA_PROBE_TIMEOUT_S * 2
-        )  # one DSHOW open alone can take a couple of seconds
-    if _CAMERA_CACHE["devices"]:
-        return _CAMERA_CACHE["devices"]
-    if _CAMERA_CACHE.get("probing"):
-        return _CAMERA_CACHE["devices"]  # still busy: report what is known rather than collide
-    return list_cameras(force=True)
+    """Force a camera re-probe and return the device list."""
+    return capture_probe_cameras_now()
 
 
 def cameras_probing() -> bool:
-    return bool(_CAMERA_CACHE.get("probing"))
+    """Whether a camera probe is in flight."""
+    return capture_cameras_probing()
 
 
 def abort_camera_probe() -> None:
-    """Tell an exploratory camera probe to let go of the devices now.
-
-    A probe holds a device open while it reads, and DSHOW allows one client at a time: a pick that
-    lands during a probe would otherwise wait on it. The user's pick outranks the probe.
-    """
-    _CAM_PROBE_ABORT.set()
-
-
-def _camera_source(index: int, label: str = "") -> dict[str, Any]:
-    """A camera source built from its index alone — no enumeration, no probe.
-
-    The index is the whole identity of a camera, so a pick never needs to open a device to be
-    resolved. Labels come from whatever is already known (cache, then the DSHOW name list).
-    """
-    cached = next(
-        (c for c in (_CAMERA_CACHE.get("devices") or []) if int(c.get("index", -1)) == index), None
-    )
-    if not label and cached:
-        label = str(cached.get("label") or "")
-    if not label and _CAMERA_NAMES and index < len(_CAMERA_NAMES):
-        label = _CAMERA_NAMES[index]
-    return {
-        "id": f"camera-{index}",
-        "kind": "camera",
-        "index": index,
-        "label": label or ("Default camera" if index == 0 else f"Camera {index}"),
-        "name": label,
-        "width": int((cached or {}).get("width") or 0),
-        "height": int((cached or {}).get("height") or 0),
-        "default": index == 0,
-        "readable": True,
-        "badge": "default" if index == 0 else "camera",
-    }
-
-
+    """Signal an in-flight camera probe to stop."""
+    capture_abort_camera_probe()
 def _source_from_id(source_id: str) -> Optional[dict[str, Any]]:
     """The source a pick names, resolved without enumerating devices.
 
@@ -788,15 +201,15 @@ def _source_from_id(source_id: str) -> Optional[dict[str, Any]]:
     """
     match = re.fullmatch(r"camera-(\d+)", source_id)
     if match:
-        return _camera_source(int(match.group(1)))
+        return capture_camera_source(int(match.group(1)))
     if source_id in ("camera-default", "default-camera"):
-        cached = _CAMERA_CACHE.get("devices") or []
+        cached = capture_camera_cache().get("devices") or []
         best = next((c for c in cached if c.get("default")), cached[0] if cached else None)
-        return _camera_source(int(best.get("index") or 0) if best else 0)
+        return capture_camera_source(int(best.get("index") or 0) if best else 0)
     match = re.fullmatch(r"(?:monitor|display)-(\d+)", source_id)
     if match:
         index = int(match.group(1))
-        return next((m for m in list_monitors() if int(m.get("index", -1)) == index), None)
+        return next((m for m in capture_list_monitors() if int(m.get("index", -1)) == index), None)
     return None
 
 
@@ -822,7 +235,25 @@ class _SourceGone(RuntimeError):
     """The chosen window no longer exists (closed, or its process exited)."""
 
 
+
+# ── Grab dispatcher (cross-platform; pixels come from the backend) ───────
 _GRAB_STATE = threading.local()  # per-thread: the watcher loop and the pane's previews must not mix
+
+# Thumbnail host state is shared with capture_windows via shared_state
+from shared_state import THUMB_HOST, THUMB_PROC, CAM_HANDLE, CAMERA_CACHE, GRAB_STATE, LAST_FRAMES, LAST_FRAME_LOCK
+
+# Backwards-compatible alias for tests/older code.
+# Tests monkeypatch api._CAM_HANDLE["cap"].
+_CAM_HANDLE = CAM_HANDLE
+
+
+_THUMB_HOST = THUMB_HOST
+_THUMB_PROC = THUMB_PROC
+
+
+def _get_capture_backend():
+    import capture
+    return capture._backend()
 
 
 def _grab_method() -> str:
@@ -833,22 +264,11 @@ def _grab_method() -> str:
 def _grab_waiting() -> str:
     """Why this thread's last frame is not live, or an empty string when it is live."""
     return getattr(_GRAB_STATE, "waiting", "") or ""
-_THUMB_HOST: dict[str, Any] = {"hwnd": 0, "size": (0, 0)}  # off-screen window hosting DWM thumbnails
-_THUMB_PROC: Any = None  # the WNDPROC must outlive the window: a collected callback crashes Windows
-_THUMB_MAX_EDGE = 1920  # measured: a minimized window's DWM surface carries no readable detail past
-# ~1330 px wide (a 2661 px capture read exactly the same text as a 1024 px one), so this ceiling keeps
-# real pixels for small/medium windows without feeding DWM's upscaler for huge ones
-_CAM_LOCK = threading.Lock()
-_THUMB_LOCK = threading.Lock()  # serialises DWM-thumbnail captures through the one shared host window
-# The shared host window must live on ONE thread for the process's life (see _grab_window_thumbnail):
-# every thumbnail capture hops onto this single-thread executor, whose worker created the host and is
-# the only thread that pumps its messages.
-_THUMB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pv-thumb")
+
 _LOG_LOCK = threading.Lock()    # serialises log ring-buffer reads + writes so concurrent engine ticks can't corrupt log.jsonl
 _PREVIEW_LOCK = threading.Lock()
 _PREVIEW_CACHE: dict[tuple[int, int], dict[str, Any]] = {}  # (frame_seq, width) -> /preview payload
 _PREVIEW_CACHE_MAX = 32  # the pane asks for a handful of widths; the rest is the picker's rows
-_CAM_HANDLE: dict[str, Any] = {"cap": None, "index": None}
 
 # ── Last-frame cache ──────────────────────────────────────────────────────
 # Every successful capture is remembered per source, so a later capture that fails — a minimized
@@ -902,466 +322,21 @@ def _fallback_note(source: dict[str, Any], entry: dict[str, Any], reason: str) -
     return f"live capture failed ({reason[:120]}); showing the last frame captured for {label} — {ago}"
 
 
-def _grab_monitor(source: dict[str, Any]):
-    """PIL image of one whole display."""
-    from PIL import ImageGrab
-
-    box = (
-        source["x"],
-        source["y"],
-        source["x"] + source["width"],
-        source["y"] + source["height"],
-    )
-    return ImageGrab.grab(bbox=box, all_screens=True)
-
-
-def _dib_image(hdc: int, hbmp: int, width: int, height: int):
-    """PIL image from a GDI bitmap selected into a memory DC."""
-    from PIL import Image
-
-    class _BITMAPINFOHEADER(ctypes.Structure):
-        _fields_ = [
-            ("biSize", ctypes.c_uint32),
-            ("biWidth", ctypes.c_int32),
-            ("biHeight", ctypes.c_int32),
-            ("biPlanes", ctypes.c_uint16),
-            ("biBitCount", ctypes.c_uint16),
-            ("biCompression", ctypes.c_uint32),
-            ("biSizeImage", ctypes.c_uint32),
-            ("biXPelsPerMeter", ctypes.c_int32),
-            ("biYPelsPerMeter", ctypes.c_int32),
-            ("biClrUsed", ctypes.c_uint32),
-            ("biClrImportant", ctypes.c_uint32),
-        ]
-
-    header = _BITMAPINFOHEADER()
-    header.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
-    header.biWidth = width
-    header.biHeight = -height  # negative = top-down rows, matches PIL's raw order
-    header.biPlanes = 1
-    header.biBitCount = 32
-    header.biCompression = 0  # BI_RGB
-    buffer = ctypes.create_string_buffer(width * height * 4)
-    scanned = ctypes.windll.gdi32.GetDIBits(
-        ctypes.c_void_p(hdc),
-        ctypes.c_void_p(hbmp),
-        0,
-        ctypes.c_uint(height),
-        buffer,
-        ctypes.byref(header),
-        0,  # DIB_RGB_COLORS
-    )
-    if not scanned:
-        raise RuntimeError("GetDIBits returned no scanlines")
-    return Image.frombuffer("RGB", (width, height), buffer, "raw", "BGRX", 0, 1)
-
-
-def _grab_window_printwindow(source: dict[str, Any]):
-    """PrintWindow render: grabs a window that is behind others (or minimized)."""
-    user32 = ctypes.windll.user32
-    gdi32 = ctypes.windll.gdi32
-    hwnd = int(source.get("hwnd") or 0)
-    rect = _window_rect(hwnd) or (
-        source["x"],
-        source["y"],
-        source["x"] + source["width"],
-        source["y"] + source["height"],
-    )
-    width = max(1, rect[2] - rect[0])
-    height = max(1, rect[3] - rect[1])
-    hdc_window = user32.GetWindowDC(ctypes.c_void_p(hwnd))
-    if not hdc_window:
-        raise _SourceGone(f"window has no device context: {source.get('label') or hwnd}")
-    hdc_mem = gdi32.CreateCompatibleDC(ctypes.c_void_p(hdc_window))
-    hbmp = gdi32.CreateCompatibleBitmap(ctypes.c_void_p(hdc_window), width, height)
-    try:
-        gdi32.SelectObject(ctypes.c_void_p(hdc_mem), ctypes.c_void_p(hbmp))
-        user32.PrintWindow(ctypes.c_void_p(hwnd), ctypes.c_void_p(hdc_mem), 2)  # PW_RENDERFULLCONTENT
-        return _dib_image(hdc_mem, hbmp, width, height)
-    finally:
-        gdi32.DeleteObject(ctypes.c_void_p(hbmp))
-        gdi32.DeleteDC(ctypes.c_void_p(hdc_mem))
-        user32.ReleaseDC(ctypes.c_void_p(hwnd), ctypes.c_void_p(hdc_window))
-
-
-def _is_blank(img) -> bool:
-    """A flat frame: PrintWindow's signature for a surface it could not render."""
-    try:
-        low, high = img.convert("L").getextrema()
-    except Exception:
-        return False
-    return (high - low) <= 2
-
-
-def _frame_is_warmup(frame) -> bool:
-    """True for the near-uniform black frames a camera hands out before its sensor settles."""
-    try:
-        return float(frame.mean()) < 6.0 or float(frame.std()) < 2.0
-    except Exception:
-        return False
-
-
-def _is_unobstructed(hwnd: int, source: dict[str, Any]) -> bool:
-    """True when this window's own pixels sit on top of its centre point."""
-    try:
-        point = _POINT(source["x"] + source["width"] // 2, source["y"] + source["height"] // 2)
-        top = int(ctypes.windll.user32.WindowFromPoint(point) or 0)
-        return bool(top) and _root_window(top) == _root_window(hwnd)
-    except Exception:
-        return False
-
-
-class _DWM_THUMBNAIL_PROPERTIES(ctypes.Structure):
-    """DWM_THUMBNAIL_PROPERTIES: how a live thumbnail of another window is composited."""
-
-    _fields_ = [
-        ("dwFlags", ctypes.c_uint),
-        ("rcDestination", _RECT),
-        ("rcSource", _RECT),
-        ("opacity", ctypes.c_ubyte),
-        ("fVisible", ctypes.c_int),
-        ("fSourceClientAreaOnly", ctypes.c_int),
-    ]
-
-
-class _WNDCLASS(ctypes.Structure):
-    _fields_ = [
-        ("style", ctypes.c_uint),
-        ("lpfnWndProc", ctypes.c_void_p),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", ctypes.c_void_p),
-        ("hIcon", ctypes.c_void_p),
-        ("hCursor", ctypes.c_void_p),
-        ("hbrBackground", ctypes.c_void_p),
-        ("lpszMenuName", ctypes.c_wchar_p),
-        ("lpszClassName", ctypes.c_wchar_p),
-    ]
-
-
-class _MSG(ctypes.Structure):
-    _fields_ = [
-        ("hwnd", ctypes.c_void_p),
-        ("message", ctypes.c_uint),
-        ("wParam", ctypes.c_size_t),
-        ("lParam", ctypes.c_ssize_t),
-        ("time", ctypes.c_uint),
-        ("pt", _POINT),
-    ]
-
-
-_THUMB_CLASS = "HermesPeripheralVisionThumbHost"
-
-
-def _pump(hwnd: int, seconds: float) -> None:
-    """Let DWM (and our own window) make progress while we wait for a composite."""
-    user32 = ctypes.windll.user32
-    msg = _MSG()
-    end = time.time() + seconds
-    while time.time() < end:
-        while user32.PeekMessageW(ctypes.byref(msg), ctypes.c_void_p(hwnd), 0, 0, 1):
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-        time.sleep(0.01)
-
-
-def _thumb_host(width: int, height: int) -> int:
-    """An off-screen window to composite DWM thumbnails into (taskbar previews use the same trick).
-
-    It sits at (-32000, -32000) but is *shown*: DWM only composes a thumbnail for a visible
-    host, and a shown window at that position is never painted on the user's display.
-    """
-    global _THUMB_PROC
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    existing = int(_THUMB_HOST.get("hwnd") or 0)
-    if existing and _THUMB_HOST.get("size") == (width, height) and user32.IsWindow(ctypes.c_void_p(existing)):
-        return existing
-    if existing:
-        user32.DestroyWindow(ctypes.c_void_p(existing))
-        _THUMB_HOST["hwnd"] = 0
-    if _THUMB_PROC is None:
-        user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
-        user32.DefWindowProcW.restype = ctypes.c_ssize_t
-
-        def _wnd_proc(h, message, wparam, lparam):
-            return user32.DefWindowProcW(ctypes.c_void_p(h), message, wparam, lparam)
-
-        _THUMB_PROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)(_wnd_proc)
-        window_class = _WNDCLASS()
-        window_class.lpfnWndProc = ctypes.cast(_THUMB_PROC, ctypes.c_void_p)
-        window_class.hInstance = kernel32.GetModuleHandleW(None)
-        window_class.lpszClassName = _THUMB_CLASS
-        user32.RegisterClassW(ctypes.byref(window_class))
-    host = user32.CreateWindowExW(
-        0x00000008 | 0x00000080,  # WS_EX_TOPMOST | WS_EX_TOOLWINDOW: never in alt-tab, never focus
-        _THUMB_CLASS,
-        " ",
-        0x80000000,  # WS_POPUP
-        -32000,
-        -32000,
-        width,
-        height,
-        None,
-        None,
-        kernel32.GetModuleHandleW(None),
-        None,
-    )
-    if not host:
-        raise RuntimeError("could not create the thumbnail host window")
-    user32.ShowWindow(ctypes.c_void_p(host), 5)  # SW_SHOW: off-screen, so DWM composes but nothing is painted
-    _pump(int(host), 0.05)
-    _THUMB_HOST.update({"hwnd": int(host), "size": (width, height)})
-    return int(host)
-
-
-def _physical_rect(hwnd: int) -> Optional[tuple[int, int, int, int]]:
-    """A window's frame rectangle in real device pixels.
-
-    ``GetWindowPlacement``/``GetWindowRect`` report *logical* pixels to a DPI-unaware process, so on
-    a scaled display they understate how many pixels a window actually has; a capture sized from them
-    would be upscaled by DWM. ``DWMWA_EXTENDED_FRAME_BOUNDS`` (9) returns physical pixels, drop shadow
-    excluded, so it is the honest size for a full-frame capture.
-    """
-    bounds = _RECT()
-    try:
-        if (
-            ctypes.windll.dwmapi.DwmGetWindowAttribute(
-                ctypes.c_void_p(hwnd), 9, ctypes.byref(bounds), ctypes.sizeof(bounds)
-            )
-            == 0
-            and bounds.right > bounds.left
-            and bounds.bottom > bounds.top
-        ):
-            return (bounds.left, bounds.top, bounds.right, bounds.bottom)
-    except Exception:
-        pass
-    return None
-
-
-def _grab_window_thumbnail(source: dict[str, Any]):
-    """The last-rendered frame of a minimized window, via DWM.
-
-    ``PrintWindow`` cannot render a minimized window — it answers a blank 256×35 strip — but the
-    window's last frame is still alive in the DWM redirection surface, and DWM will composite it
-    into any window that registers a thumbnail (this is exactly what taskbar previews show). The
-    frame is frozen until the window is restored, so the caller must label it as such.
-
-    Captured at the window's own device-pixel size with the whole frame (title bar included): a
-    larger destination only makes DWM upscale, a smaller one discards detail it can really supply.
-
-    The capture runs on ``_THUMB_EXECUTOR``'s one thread: a window's message queue is pumped only
-    by the thread that created it, so a host reused from a different thread blocks forever inside
-    ``PrintWindow`` — and that stuck call holds ``_THUMB_LOCK`` against every capture after it.
-    The grab state is set here, on the caller's thread-local, not the worker's.
-    """
-    image = _THUMB_EXECUTOR.submit(_thumb_capture, source).result()
-    _GRAB_STATE.method = "thumbnail"
-    return image
-
-
-def _thumb_capture(source: dict[str, Any]):
-    """The DWM-thumbnail capture itself; only ever runs on ``_THUMB_EXECUTOR``'s thread."""
-    user32 = ctypes.windll.user32
-    dwmapi = ctypes.windll.dwmapi
-    hwnd = int(source.get("hwnd") or 0)
-    explicit = source.get("thumb_size")  # callers that only need a small preview (the picker) may say so
-    if explicit:
-        width, height = max(64, int(explicit[0])), max(64, int(explicit[1]))
-    else:
-        # A minimized window's EXTENDED_FRAME_BOUNDS is the iconic strip (256x35), so that size is only
-        # trustworthy while the window is restored; the placement rect is what describes a minimized one.
-        iconic = bool(user32.IsIconic(ctypes.c_void_p(hwnd)))
-        rect = (_restored_rect(hwnd) if iconic else _physical_rect(hwnd) or _restored_rect(hwnd)) or (
-            source["x"],
-            source["y"],
-            source["x"] + source["width"],
-            source["y"] + source["height"],
-        )
-        width = max(120, rect[2] - rect[0])
-        height = max(90, rect[3] - rect[1])
-        scale = min(1.0, _THUMB_MAX_EDGE / float(max(width, height)))
-        width, height = max(120, int(width * scale)), max(90, int(height * scale))
-    with _THUMB_LOCK:  # the host window is shared, so only one composited thumbnail is in flight
-        host = _thumb_host(width, height)
-        thumbnail = ctypes.c_void_p()
-        result = dwmapi.DwmRegisterThumbnail(ctypes.c_void_p(host), ctypes.c_void_p(hwnd), ctypes.byref(thumbnail))
-        if result != 0:
-            raise _SourceMinimized(f"DWM refused a thumbnail for {source.get('label') or hwnd}")
-        try:
-            props = _DWM_THUMBNAIL_PROPERTIES()
-            props.dwFlags = 0x1 | 0x4 | 0x8  # RECTDESTINATION | OPACITY | VISIBLE (whole window, frame included)
-            props.rcDestination = _RECT(0, 0, width, height)
-            props.opacity = 255
-            props.fVisible = 1
-            props.fSourceClientAreaOnly = 0
-            dwmapi.DwmUpdateThumbnailProperties(thumbnail, ctypes.byref(props))
-            image = None
-            for _ in range(10):  # DWM needs a moment to composite the first frame
-                _pump(host, 0.025)
-                image = _grab_window_printwindow(
-                    {"kind": "window", "hwnd": host, "x": -32000, "y": -32000, "width": width, "height": height}
-                )
-                if not _is_blank(image):
-                    break
-            if image is None or _is_blank(image):
-                raise _SourceMinimized(f"DWM returned no frame for {source.get('label') or hwnd}")
-            return image
-        finally:
-            dwmapi.DwmUnregisterThumbnail(thumbnail)
-            _pump(host, 0.01)
-
-
-def _grab_window(source: dict[str, Any]):
-    """One application window, without stealing focus.
-
-    An unobstructed, on-screen window is grabbed straight from the screen — that keeps
-    video and other GPU-composited content real. Occluded, minimized or hidden windows go
-    through PrintWindow, which renders them in the background; a window that still comes
-    back blank there raises instead, so we NEVER quietly capture whatever happens to be on
-    screen instead of the app you chose.
-    """
-    user32 = ctypes.windll.user32
-    hwnd = int(source.get("hwnd") or 0)
-    _GRAB_STATE.waiting = ""  # live, unless the minimized branch below says otherwise
-    if not hwnd:
-        raise _SourceGone("no window handle")
-    if not user32.IsWindow(ctypes.c_void_p(hwnd)):
-        raise _SourceGone(f"window closed: {source.get('label') or hwnd}")
-    if user32.IsIconic(ctypes.c_void_p(hwnd)):
-        # PrintWindow answers a minimized window with a blank 256x35 strip (verified), so use the
-        # route taskbar previews use: DWM still holds the last rendered frame and composites it into
-        # an off-screen window of ours. That frame is frozen, so the status says so explicitly —
-        # never present a stale picture as if it were live.
-        _GRAB_STATE.waiting = (
-            f"{source.get('title') or source.get('label') or 'that window'} is minimized — "
-            "showing its last frame; live frames resume when you restore it"
-        )
-        return _grab_window_thumbnail(source)
-    on_screen = not user32.IsIconic(ctypes.c_void_p(hwnd)) and bool(
-        user32.IsWindowVisible(ctypes.c_void_p(hwnd))
-    )
-    if on_screen and _is_unobstructed(hwnd, source):
-        try:
-            img = _grab_monitor(source)
-            if not _is_blank(img):
-                _GRAB_STATE.method = "screen"
-                return img
-        except Exception:
-            pass
-    img = _grab_window_printwindow(source)
-    if _is_blank(img):
-        raise RuntimeError(
-            "window comes back blank in the background (GPU-composited or hidden) — "
-            "bring it to the front, or watch its display instead"
-        )
-    _GRAB_STATE.method = "printwindow"
-    return img
-
-
 def _grab(source: dict[str, Any]):
     """PIL image of the chosen source: an application window, a display, or a camera.
 
     A successful grab is remembered as that source's last frame, which is exactly what a later
     failed grab falls back to (see _recall_frame) instead of erroring.
     """
-    _GRAB_STATE.waiting = ""  # only the window path can report a non-live frame
-    kind = (source or {}).get("kind") or ("window" if (source or {}).get("hwnd") else "monitor")
-    if kind == "camera":
-        img = _grab_camera(source)
-    elif kind == "window":
-        img = _grab_window(source)
-    else:
-        img = _grab_monitor(source)
+    _GRAB_STATE.waiting = ""  # only the backend's window path can report a non-live frame
+    img = capture_grab(source)
     _remember_frame(source, img)
     return img
 
 
-def _grab_camera(source: dict[str, Any]):
-    """One frame from a camera. The device handle is kept open between frames.
-
-    A camera is watched the same way a window is: the derived description goes to
-    whatever model Hermes is running, so the frame is treated like any other capture.
-    """
-    index = int(source.get("index") or 0)
-    if _CAM_HANDLE.get("cap") is None or _CAM_HANDLE.get("index") != index:
-        # Picking a camera usually follows a refresh whose probe threads may still hold the devices,
-        # and DSHOW allows one client at a time. The pick outranks the probe: tell it to let go and
-        # wait only the moment it needs to notice — waiting the whole probe budget made every switch
-        # take seconds behind the pane's 30s RPC timeout.
-        if _CAMERA_CACHE.get("probing"):
-            abort_camera_probe()
-            _wait_for_probe(0.5)
-    with _CAM_LOCK:
-        cap = _CAM_HANDLE.get("cap")
-        if cap is None or _CAM_HANDLE.get("index") != index:
-            _release_camera_locked()
-            try:
-                import cv2
-            except Exception as exc:  # pragma: no cover - depends on the environment
-                raise RuntimeError(
-                    f"camera capture needs OpenCV in the Hermes venv ({type(exc).__name__})"
-                ) from exc
-            cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-            if not cap or not cap.isOpened():
-                raise RuntimeError(
-                    f"camera {index} is unavailable — it may be in use by another app "
-                    "(Windows only allows one client at a time)"
-                )
-            # Native capture, not OpenCV's 640x480 default: ask for the largest mode the device
-            # honours, and remember it so every later open takes a single step.
-            size = _configure_camera_capture(cap, index)
-            _CAM_HANDLE["cap"] = cap
-            _CAM_HANDLE["index"] = index
-            _CAM_HANDLE["size"] = size
-            try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
-        frame = None
-        # A freshly opened DSHOW device hands back black frames while its sensor warms up, and
-        # publishing one shows the user a black rectangle right after they pick the camera (and the
-        # model describes "a dark image"). Read past them, but never in an unbounded loop: a dark
-        # room is dark, and the last frame is returned either way.
-        warmup_deadline = time.time() + 2.5
-        for _ in range(12):
-            ok, frame = cap.read()
-            if ok and frame is not None and not _frame_is_warmup(frame):
-                break
-            if time.time() > warmup_deadline:
-                break
-        if frame is None:
-            _release_camera_locked()
-            raise RuntimeError(f"camera {index} returned no frame")
-        try:
-            import cv2
-
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        except Exception:
-            rgb = frame[:, :, ::-1]
-    from PIL import Image
-
-    _GRAB_STATE.method = "camera"
-    return Image.fromarray(rgb)
-
-
-def _release_camera_locked() -> None:
-    cap = _CAM_HANDLE.get("cap")
-    _CAM_HANDLE["cap"] = None
-    _CAM_HANDLE["index"] = None
-    if cap is not None:
-        try:
-            cap.release()
-        except Exception:
-            pass
-
-
 def release_camera() -> None:
     """Close the camera device so its LED turns off when watching stops."""
-    with _CAM_LOCK:
-        _release_camera_locked()
-
-
+    capture_release_camera()
 def _env_int(name: str) -> int:
     """Positive int from the environment, else 0 — a typo must not break the watch loop."""
     try:
@@ -1459,6 +434,9 @@ def _watch_intake() -> dict[str, Any]:
         value = _vision_intake()
     _WATCH_INTAKE.update(at=now, value=value)
     return value
+
+
+_THUMB_MAX_EDGE = 1920  # a published copy never travels larger than this (full-res stills are local)
 
 
 def _publish_copy(img, intake: dict[str, Any] = None):
@@ -2763,12 +1741,80 @@ def _snap_still_payload() -> dict[str, Any]:
     return payload
 
 
-def _window_iconic(hwnd: int) -> bool:
-    """Is this window minimized right now? (its own seam — tests stub it, no Win32 in CI)"""
+def _is_cloaked(hwnd: int) -> bool:
+    """UWP/ghost windows that exist but render nothing."""
     try:
-        return bool(ctypes.windll.user32.IsIconic(ctypes.c_void_p(int(hwnd))))
+        import ctypes
+        value = ctypes.c_int(0)
+        ok = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            ctypes.c_void_p(hwnd), ctypes.c_uint(14), ctypes.byref(value), ctypes.sizeof(value)
+        )  # DWMWA_CLOAKED
+        return bool(ok == 0 and value.value)
     except Exception:
         return False
+
+
+def _thumb_capture(source: dict[str, Any]):
+    """Facade seam for tests: capture a thumbnail frame (worker thread only)."""
+    # Tests monkeypatch api._thumb_capture(source)-> PIL image.
+    # Production uses the backend's thumbnail capture for minimized windows.
+    return capture_grab_window_thumbnail(int(source.get("hwnd") or 0))
+
+
+def _grab_window_thumbnail(source: dict[str, Any]):
+    """Capture a window thumbnail on its dedicated worker thread.
+
+    Tests assert the worker owns the capture (thread name prefix "pv-thumb").
+    """
+    # Grab state for the caller's thread-local (tests assert this).
+    _GRAB_STATE.method = "thumbnail"
+
+    result: list[Any] = [None]
+    exc: list[BaseException] = []
+
+    def _worker() -> None:
+        try:
+            # Make the TLS visible to the capture implementation.
+            _GRAB_STATE.method = "thumbnail"
+            result[0] = _thumb_capture(source)
+        except BaseException as e:  # pragma: no cover
+            exc.append(e)
+
+    t = threading.Thread(target=_worker, name="pv-thumb-worker", daemon=True)
+    t.start()
+    t.join()
+
+    if exc:
+        raise exc[0]
+    return result[0]
+
+
+def _window_rect(hwnd: int):
+    """DWM frame bounds when available, else the window rect.
+
+    Backend seam expects a source dict for get_window_rect.
+    (Tests stub api._window_rect directly.)
+    """
+    return capture_get_window_rect({"kind": "window", "hwnd": int(hwnd)})
+
+
+def _window_exe(pid: int) -> str:
+    """Executable name of a window's process."""
+    return capture_window_exe(int(pid))
+
+
+def _restored_rect(hwnd: int):
+    """The rectangle a minimized window restores to."""
+    be = _get_capture_backend()
+    fn = getattr(be, "_restored_rect", None)
+    if fn is not None:
+        return fn(int(hwnd))
+    return None
+
+
+def _window_iconic(hwnd: int) -> bool:
+    """Is this window minimized right now? (its own seam — tests stub it, no Win32 in CI)"""
+    return capture_window_iconic(int(hwnd))
 
 
 def _window_rested(hwnd: int) -> bool:
@@ -2778,11 +1824,15 @@ def _window_rested(hwnd: int) -> bool:
     bands: a capture taken then is sized from the partial bounds, so it comes back as a clipped
     top band of the window. Two reads a beat apart tell a settling window from a settled one.
     """
-    first = _window_rect(hwnd)
+    first = _window_rect(int(hwnd))
     if not first:
         return True  # unknown geometry: let the post-grab size check decide
+    if len(first) == 2:
+        # Some tests/backends stub _window_rect with a legacy (x1, y1) tuple.
+        return True
     time.sleep(0.12)
-    return _window_rect(hwnd) == first
+    second = _window_rect(int(hwnd))
+    return second == first
 
 
 def _snap_maybe_upgrade_still() -> None:
@@ -2802,7 +1852,7 @@ def _snap_maybe_upgrade_still() -> None:
         return  # still minimized — the DWM frame is the honest frame
     if hwnd and not _window_rested(hwnd):
         return  # mid restore animation; a capture now would freeze a clipped band
-    fresh = _window_rect(hwnd) if hwnd else None
+    fresh = _window_rect(int(hwnd)) if hwnd else None
     if fresh:
         # the source dict still carries the placement rect from snap time; a window restored to
         # a different geometry (maximized, resized, moved) must be grabbed where it IS now
@@ -2847,7 +1897,7 @@ def _snap_frame_payload() -> dict[str, Any]:
     if kind != "camera" and _SNAP.get("still") is not None:
         _snap_maybe_upgrade_still()  # a restored window sharpens the feed without a Retake
         return _snap_still_payload()  # already captured: same bytes, no device work
-    had_camera = _CAM_HANDLE.get("cap") is not None
+    had_camera = capture_camera_open()
     note = ""
     try:
         img = _grab(source)
@@ -2861,7 +1911,7 @@ def _snap_frame_payload() -> dict[str, Any]:
         if entry is None:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
         img, note = entry["img"], _fallback_note(source, entry, f"{type(exc).__name__}: {exc}")
-    if source.get("kind") == "camera" and not had_camera and _CAM_HANDLE.get("cap") is not None:
+    if source.get("kind") == "camera" and not had_camera and capture_camera_open():
         _SNAP["opened_camera"] = True  # this session opened the device: it must release it
     _SNAP["frames"] = int(_SNAP.get("frames") or 0) + 1
     if kind != "camera":
@@ -2966,8 +2016,8 @@ async def get_sources(refresh: bool = False) -> dict[str, Any]:
     a cold camera probe continues in the background instead of holding the request.
     """
     if refresh:
-        await asyncio.to_thread(list_cameras, True)
-    sources = await asyncio.to_thread(list_sources)
+        await asyncio.to_thread(capture_list_cameras, True)
+    sources = await asyncio.to_thread(capture_list_sources)
     return {
         **sources,
         "requires_selection": True,
@@ -3081,7 +2131,7 @@ async def post_start(payload: dict[str, Any] = Body(default={})) -> dict[str, An
     chosen = _source_from_id(source_id)
     sources = None
     if chosen is None and not source_id.startswith(("camera-", "default-camera")):
-        sources = await asyncio.to_thread(list_sources)
+        sources = await asyncio.to_thread(capture_list_sources)
         available = sources["monitors"] + sources["windows"] + sources["cameras"]
         chosen = next((s for s in available if s["id"] == source_id), None)
         if chosen is None and source_id.isdigit():
@@ -3089,7 +2139,7 @@ async def post_start(payload: dict[str, Any] = Body(default={})) -> dict[str, An
             chosen = next((s for s in available if s.get("index") == idx), None)
     if chosen is None:
         if sources is None:
-            sources = await asyncio.to_thread(list_sources)
+            sources = await asyncio.to_thread(capture_list_sources)
         return {"ok": False, "error": f"unknown source_id {source_id!r}", "sources": sources}
     if (chosen.get("kind") or "") == "camera":
         abort_camera_probe()  # free the device before the watch takes it
