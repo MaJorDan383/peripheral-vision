@@ -18,7 +18,9 @@ Peripheral Vision is a Hermes plugin that keeps a live view of your screen, wind
 Source, issues and releases: **https://github.com/MaJorDan383/peripheral-vision**
 
 ### Requirements
-- **Windows 10/11** (the capture stack uses Win32/DWM/DirectShow — no Linux/macOS support)
+- **Windows 10/11** (Win32/DWM/DirectShow) or **Linux** (X11 and Wayland/GNOME — monitors
+  capture, window list and per-window crops via xdg-desktop-portal; macOS unsupported). See
+  `docs/cross-platform-capture.md` for the exact per-session feature matrix.
 - Python 3.9+
 - Hermes **0.20.1 or newer** (declared as `requires_hermes` in `plugin.yaml`). 0.20.1 is the
   oldest host that has everything the plugin calls — `ctx.on_unload` and the `pre_llm_call`

@@ -1,7 +1,9 @@
 # Cross-platform capture feasibility (Windows + Linux in one plugin)
 
-Status: findings, 2026-09-23. Today every grab is Windows-only; this documents what a Linux
-tier would take, what survives, and what does not.
+Status: implemented + live-verified, 2026-09-27. Capture dispatches at import time
+(`capture.py` → `capture_windows` / `capture_linux`); Linux grabs were verified on a live
+GNOME Wayland VM (Ubuntu 24.04). This doc records the ceiling we found and what each
+session type can and cannot do.
 
 ## Verdict
 
