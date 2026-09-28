@@ -5,6 +5,12 @@ Status: implemented + live-verified, 2026-09-27. Capture dispatches at import ti
 GNOME Wayland VM (Ubuntu 24.04). This doc records the ceiling we found and what each
 session type can and cannot do.
 
+> **Linux is preview, not parity.** Verified tier: GNOME/Wayland only. X11 and KDE/wlroots
+> paths are code-complete and unit-tested but not yet run live; camera capture is untested on
+> real Linux hardware. The PipeWire ScreenCast fast path (below) is *designed but not
+> implemented* — live grabs use the slow one-shot portal screenshot (~1.5–3.2 s), which is why
+> the README labels Linux preview. Tracking: issue #1.
+
 ## Verdict
 
 - **No single capture library delivers parity on both OSes.** mss / Pillow / pyscreenshot are

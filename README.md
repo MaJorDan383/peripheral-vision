@@ -13,14 +13,31 @@ Peripheral Vision is a Hermes plugin that keeps a live view of your screen, wind
 - **Desktop pane** — shows a live preview with monitor/window/camera picker, vision model candidates, and pin support
 - **Manual snapshots** — set "Blink rate" to manual and snapshot on demand: a camera frame, or a drag-cropped screenshot of a display or window, lands in the message input ready to send
 
+## Platform support
+
+| Platform | Status | Notes |
+|---|---|---|
+| **Windows 10/11** | ✅ **Stable** | DWM monitor + window capture, DirectShow cameras — the original, battle-tested path. |
+| **Linux — GNOME/Wayland** | 🧪 **Preview** | Live-verified on Ubuntu 24.04 GNOME (Wayland). Monitors, window list and per-window crops work via `xdg-desktop-portal`. Caveats below. |
+| **Linux — X11 / KDE / wlroots** | 🧪 **Preview (unverified)** | Code-complete and unit-tested (EWMH/`wmctrl`, XComposite, grim), but not yet run on a real session of those types. |
+| **macOS** | ❌ Unsupported | Not implemented; the installer refuses on `darwin`. |
+
+**Linux preview caveats:**
+- **Grab speed:** each frame goes through a one-shot portal screenshot (~1.5–3.2 s), so a watch
+  loop runs slower than on Windows (~50 ms). A PipeWire screencast path is planned to close this
+  gap — see issue #1.
+- **Window crops are region-crops on Wayland** — an overlapping window can bleed in. Wayland
+  cannot expose window geometry, so this is inherent to the platform, not a bug.
+- **First grab shows a one-time portal consent dialog** (persisted afterwards via the portal).
+- **Camera capture is untested on real Linux hardware** — reports welcome.
+
 ## Installation
 
 Source, issues and releases: **https://github.com/MaJorDan383/peripheral-vision**
 
 ### Requirements
-- **Windows 10/11** (Win32/DWM/DirectShow) or **Linux** (X11 and Wayland/GNOME — monitors
-  capture, window list and per-window crops via xdg-desktop-portal; macOS unsupported). See
-  `docs/cross-platform-capture.md` for the exact per-session feature matrix.
+- **Windows 10/11** (Win32/DWM/DirectShow) or **Linux** (see [Platform support](#platform-support);
+  macOS unsupported). See `docs/cross-platform-capture.md` for the exact per-session feature matrix.
 - Python 3.9+
 - Hermes **0.20.1 or newer** (declared as `requires_hermes` in `plugin.yaml`). 0.20.1 is the
   oldest host that has everything the plugin calls — `ctx.on_unload` and the `pre_llm_call`

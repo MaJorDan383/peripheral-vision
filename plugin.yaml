@@ -8,7 +8,7 @@ description: >-
 license: "MIT"
 author: "MaJorDan"
 homepage: "https://github.com/MaJorDan383/peripheral-vision"
-platforms: ["windows"]
+platforms: ["windows", "linux"]
 # Lowest host with everything the plugin calls: ctx.on_unload and the pre_llm_call hook both
 # exist from 0.20.1 (0.20.0 has no on_unload, so its unload path would leak the capture loop),
 # as do the pane API and the dashboard/plugin.js conventions. Hosts older than 0.21.2 ignore
