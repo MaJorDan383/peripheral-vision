@@ -121,6 +121,8 @@ class _FakeUser32:
 @pytest.fixture
 def install(monkeypatch: pytest.MonkeyPatch):
     def _install(windows: list[_Win]) -> _FakeUser32:
+        if not hasattr(ctypes, "windll"):
+            pytest.skip("Windows-only (ctypes.windll)")
         fake = _FakeUser32(windows)
         monkeypatch.setattr(api.ctypes.windll, "user32", fake)
         monkeypatch.setattr(api, "_is_cloaked", lambda h: False)
