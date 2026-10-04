@@ -59,6 +59,18 @@ class _Count:
         self.calls += 1
 
 
+@pytest.fixture(autouse=True)
+def _pane_selection():
+    """This file tests the routes' REAL behavior with the pane's selection gate OPEN.
+
+    The gate itself (closed-state refusals, TTL, /status blinding) has its own file:
+    tests/test_selection_gate.py. Cleared afterwards so no selection leaks into other files.
+    """
+    asyncio.run(api.post_select({"source_id": "monitor-1"}))
+    yield
+    asyncio.run(api.post_select({"source_id": ""}))
+
+
 @pytest.fixture
 def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Throwaway state + a synthetic grab; nothing reaches the live plugin's files."""

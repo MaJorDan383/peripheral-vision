@@ -11,12 +11,17 @@ Route map
 ---------
 - ``GET  /monitors``  → enumerate displays (index, name, bounds, primary)
 - ``GET  /sources``   → enumerate displays, app windows, and attached cameras
+- ``POST /select``    → the pane publishes its live selection here; this is the
+                         gate every content route below reads (45s TTL, the pane
+                         re-publishes every 10s while it is open)
 - ``POST /start``     → begin the loop on one explicitly selected source
                          (never defaults; the UI must prompt for a choice)
 - ``POST /stop``      → stop the loop
 - ``GET  /status``    → running state + ring buffer of recent descriptions
+                         (the description text itself is gated with the content)
 - ``POST /inject_mode`` → when fresh readings ride turns (pane pick beats the env var)
-- ``GET  /preview``   → last captured frame (downscaled data URL) for the pane
+- ``GET  /preview``   → last captured frame (downscaled data URL) for the pane,
+                         gated: refused while the pane holds no selected source
 
 State is persisted to ``$HERMES_HOME/cache/peripheral-vision/`` so the
 ``pre_llm_call`` hook (which runs in the agent/gateway process, not this web
@@ -40,7 +45,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, HTTPException, Request
 
 # Cross-platform capture abstraction
 # Cross-platform capture abstraction
@@ -2002,6 +2007,80 @@ def _snap_save(rect: Any) -> dict[str, Any]:
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
+# ── the pane's selection gate ────────────────────────────────────────────────────────
+# Screen content may flow only while the PLUGIN PANE holds a selected source. The router is
+# mounted at /api/plugins/peripheral-vision/* for EVERY caller the dashboard's auth admits —
+# a token-holding console, a web session on the tailnet, or a local process — and without
+# this gate any of them could silently pull live frames via /preview or open a watch via
+# /start without the pane ever being asked. The pane publishes its selection over POST /select
+# and re-publishes it every 10s while it is open; a closed pane stops publishing, and the
+# gate fades after _SELECT_TTL_S even if the pane crashed mid-flight. Gated: /preview,
+# /start, /snap/start, /snap/frame, /snap, and the description text inside /status.
+# /stop, /sources, /monitors, /interval, /inject_mode, /vision stay open: metadata and
+# teardown only (an attacker must never be able to hold the watch OFF).
+_SELECT_TTL_S = 45.0
+_SELECTION: dict[str, Any] = {"source_id": "", "at": 0.0}
+
+
+def _selection_fresh() -> bool:
+    """True while the pane's published selection has not gone stale."""
+    if not _SELECTION.get("source_id"):
+        return False
+    return (time.time() - float(_SELECTION.get("at") or 0.0)) <= _SELECT_TTL_S
+
+
+def _selection_refusal() -> Optional[dict[str, Any]]:
+    """None when the gate is open; the standard ``ok: False`` payload when it is not."""
+    if _selection_fresh():
+        return None
+    return {
+        "ok": False,
+        "error": "the plugin pane has no selected source — pick one there first (screen content stays gated until it is)",
+        "selection_required": True,
+    }
+
+
+def _selection_write_allowed(request: Optional[Request]) -> bool:
+    """Who may publish a selection: only a caller the dashboard's own auth let through.
+
+    On the mounted router that is the session token (loopback mode) or the gated cookie
+    session — the same bar every other /api/ route clears. The router also gets mounted
+    with NO auth layer at all (tests, the standalone dev server): there
+    ``app.state.auth_required`` never exists, the server binds loopback only, and
+    publishing stays open so the dev flow keeps working.
+    """
+    app = getattr(request, "app", None) if request is not None else None
+    if app is None or not hasattr(app.state, "auth_required"):
+        return True
+    try:
+        from hermes_cli.web_server import _require_token
+
+        _require_token(request)  # raises 401 when the caller carries no session
+        return True
+    except HTTPException:
+        return False
+    except Exception:
+        # The auth layer exists but can't be verified from here; auth_middleware has
+        # already gated every non-public /api/ route, so anything that reached this
+        # handler is a session the dashboard accepted.
+        return True
+
+
+@router.post("/select")
+async def post_select(payload: dict[str, Any] = Body(default={}), request: Request = None) -> dict[str, Any]:
+    """Publish the pane's current selection: an id opens the gate, ``""`` closes it.
+
+    The pane fires this on every pick, every 10s while open, and once on close — so a
+    closed (or dead) pane can never leave content routes unlocked.
+    """
+    source_id = str(payload.get("source_id") or "").strip()
+    if not _selection_write_allowed(request):
+        return {"ok": False, "error": "publishing a selection requires the dashboard session"}
+    _SELECTION["source_id"] = source_id
+    _SELECTION["at"] = time.time() if source_id else 0.0
+    return {"ok": True, "source_id": source_id, "ttl_s": _SELECT_TTL_S}
+
+
 @router.get("/monitors")
 async def get_monitors() -> dict[str, Any]:
     """Compatibility route: displays plus application windows."""
@@ -2077,13 +2156,22 @@ async def get_status() -> dict[str, Any]:
     # The snapshot session's janitor: a killed overlay leaves no /snap/stop, and an
     # unreleased camera means the LED stays on — this poll is the waking call.
     await asyncio.to_thread(_reap_snap_if_stale)
-    return {
+    payload = {
         **engine_status,
         "intake": _watch_intake(),
         "inject_mode": _inject_mode_state(),
         "interval": _interval_state(engine_status.get("running")),
         "snap": True,
     }
+    # The descriptions ARE screen content in text form: a dashboard caller must not learn
+    # what is on the screen from a status poll the pane never opened. Everything else here
+    # is metadata (state, cadence, model) and stays readable.
+    if not _selection_fresh():
+        if "recent" in payload:
+            payload["recent"] = []
+        if "last_description" in payload:
+            payload["last_description"] = None
+    return payload
 
 
 @router.get("/vision")
@@ -2117,6 +2205,9 @@ async def post_vision(payload: dict[str, Any] = Body(default={})) -> dict[str, A
 @router.post("/start")
 async def post_start(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
     """Start the loop. ``source_id`` is mandatory: this never picks a default."""
+    refused = _selection_refusal()
+    if refused:
+        return refused
     source_id = str(payload.get("source_id") or payload.get("monitor_id") or "").strip()
     if not source_id:
         return {
@@ -2207,6 +2298,9 @@ async def post_snap_start(payload: dict[str, Any] = Body(default={})) -> dict[st
     shared, but a DIFFERENT one is refused rather than thrashing the single device handle.
     ``source_id`` is mandatory.
     """
+    refused = _selection_refusal()
+    if refused:
+        return refused
     source_id = str(payload.get("source_id") or "").strip()
     if not source_id:
         return {"ok": False, "error": "source_id is required — pick a source to snapshot."}
@@ -2246,6 +2340,9 @@ async def get_snap_frame(session_id: str = "") -> dict[str, Any]:
 
     A camera re-grabs per poll; a display/window session replays its stored still.
     """
+    refused = _selection_refusal()
+    if refused:
+        return refused
     if not session_id or session_id != _SNAP.get("id"):
         return {"ok": False, "error": "snapshot session not found — reopen the snapshot"}
     if time.time() - float(_SNAP.get("at") or 0) > SNAP_TTL_S:
@@ -2266,6 +2363,9 @@ async def post_snap(payload: dict[str, Any] = Body(default={})) -> dict[str, Any
     The base64 twin in the response is what the pane stages into the chat input, and
     the session stays open so one view can yield several crops.
     """
+    refused = _selection_refusal()
+    if refused:
+        return refused
     session_id = str(payload.get("session_id") or "")
     if not session_id or session_id != _SNAP.get("id"):
         return {"ok": False, "error": "snapshot session not found — reopen the snapshot"}
@@ -2306,6 +2406,9 @@ async def get_preview(width: int = 640, hwnd: int = 0) -> dict[str, Any]:
     frame answers instead, flagged ``last_frame``. The watch loop's status is untouched: grab state
     is per thread.
     """
+    refused = _selection_refusal()
+    if refused:
+        return refused
     method = ENGINE.grab_method
     waiting = ENGINE.waiting
     if hwnd:

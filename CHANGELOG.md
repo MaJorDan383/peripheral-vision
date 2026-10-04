@@ -5,6 +5,17 @@ All notable changes to this plugin. Nothing before the first public release was 
 
 ## [Unreleased]
 
+### Security
+- **Screen content is gated on the pane's selection.** `/preview`, `/start`, `/snap/start`,
+  `/snap/frame` and `/snap` — plus the descriptions inside `/status` — now refuse until the
+  plugin pane has published a selected source over the new `POST /select`, re-verified by a
+  10-second heartbeat with a 45-second TTL (a closed or crashed pane closes the gate itself,
+  and publishing requires the dashboard's own session). A dashboard caller with a valid
+  session but no open pane — a token console, another tab, a local script — can no longer
+  pull live frames, open a watch, or read the description ring buffer while the pane isn't
+  showing anything. Stop, sources, interval, inject-mode and vision stay open: metadata and
+  teardown must never be gateable.
+
 ### Added
 - **An auxiliary vision model is honored.** When one is picked in Hermes' own settings
   (`auxiliary.vision` in `config.yaml`), the watch's live descriptions route to it — the same

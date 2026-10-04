@@ -55,7 +55,7 @@ import {
   useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'peripheral-vision'
@@ -182,14 +182,18 @@ function SourceRow({ source, selected, onSelect, preview }) {
 
 // Windows come with a live thumbnail of their own: what the watch would actually see right now —
 // including a minimized window's last frame.
-function WindowRow({ source, selected, onSelect, ctx }) {
+function WindowRow({ source, selected, onSelect, ctx, enabled }) {
   const preview = useQuery({
     queryKey: [ID, 'preview', source.hwnd || source.id],
     queryFn: () => ctx.rest(`/preview?hwnd=${source.hwnd || 0}&width=160`),
     staleTime: 20000,
-    refetchInterval: false
+    refetchInterval: false,
+    // Gate closed → never fetch, and SourceRow gets no preview object at all: the row
+    // shows its title/detail only, and no cached frame from an earlier pick can render
+    // while no source is selected.
+    enabled: Boolean(enabled)
   })
-  return jsx(SourceRow, { source, selected, onSelect, preview })
+  return jsx(SourceRow, { source, selected, onSelect, preview: enabled ? preview : undefined })
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +357,47 @@ function PeripheralVisionPane({ ctx }) {
   const snapBoxRef = useRef(null)
   const snapDragRef = useRef(null)
 
+  // ── the content gate ───────────────────────────────────────────────────────
+  // Screen content may only flow while THIS pane holds a selected source. Every pick
+  // publishes over POST /select; while the pane stays open we re-publish every 10s, and
+  // closing the pane publishes "" so the backend's 45s TTL is never what waits. The
+  // backend refuses /preview, /start and /snap/* (and blanks the descriptions in /status)
+  // until this lands — a dashboard caller with a valid token would otherwise be a silent
+  // second viewer of the screen, watching frames the pane never asked for.
+  const selectionRef = useRef('')
+  const pushSelection = useCallback(
+    async id => {
+      selectionRef.current = id
+      try {
+        await ctx.rest('/select', { method: 'POST', body: { source_id: id } })
+      } catch (err) {
+        // Missed publish → the next 10s beat retries; a dead pane expires via the TTL.
+      }
+    },
+    [ctx]
+  )
+  // The overlay's own source wins while a snapshot is open; otherwise the watch's pick.
+  const selectionId = (snap && snap.source && snap.source.id) || (chosen && chosen.id) || ''
+  useEffect(() => {
+    pushSelection(selectionId)
+  }, [selectionId, pushSelection])
+  useEffect(() => {
+    const beat = setInterval(() => pushSelection(selectionRef.current), 10000)
+    return () => {
+      clearInterval(beat)
+      pushSelection('') // pane unmounted → close the gate now, not in 45s
+    }
+  }, [pushSelection])
+  const gateOpen = selectionId !== ''
+  const choose = useCallback(
+    source => {
+      // Publish FIRST so the row previews' very first fetch can't beat the gate open.
+      pushSelection(source.id)
+      setChosen(source)
+    },
+    [pushSelection]
+  )
+
   const status = useQuery({
     queryKey: [ID, 'status'],
     queryFn: () => ctx.rest('/status'),
@@ -398,7 +443,8 @@ function PeripheralVisionPane({ ctx }) {
     queryKey: [ID, 'preview'],
     queryFn: () => ctx.rest('/preview'),
     refetchInterval: running ? 6000 : false,
-    enabled: running
+    // Gate closed → no fetch; the pane's held selection is what may show the screen.
+    enabled: running && gateOpen
   })
   // The crop overlay's live feed (only while the overlay is open).
   const snapFrame = useQuery({
@@ -443,6 +489,8 @@ function PeripheralVisionPane({ ctx }) {
     }
     setBusy(true)
     setError('')
+    // Make sure the gate is published before the engine starts capturing for it.
+    await pushSelection(chosen.id)
     try {
       // The chat the user is looking at: frames are described by ITS model, not by
       // the profile default in config.yaml.
@@ -532,6 +580,9 @@ function PeripheralVisionPane({ ctx }) {
       setSnapError('')
       setSnapSel(null)
       setSnapBusy(true)
+      // The overlay's source becomes the gate's selection before /snap/start checks it
+      // (the selectionId effect only runs after setSnap below, i.e. too late for this call).
+      await pushSelection(source.id)
       try {
         const result = await ctx.rest('/snap/start', { method: 'POST', body: { source_id: source.id } })
         if (!result || result.ok === false) {
@@ -690,7 +741,8 @@ function PeripheralVisionPane({ ctx }) {
   }, [ctx, queryClient])
 
   const recent = data.recent || []
-  const shot = preview.data && preview.data.ok ? preview.data.data_url : null
+  const shot =
+    gateOpen && preview.data && preview.data.ok ? preview.data.data_url : null
 
   return jsxs('div', {
     className: 'flex h-full flex-col gap-2 p-3 text-sm',
@@ -1060,7 +1112,7 @@ function PeripheralVisionPane({ ctx }) {
                         source =>
                           jsx(
                             SourceRow,
-                            { source, selected: chosen && chosen.id === source.id, onSelect: setChosen },
+                            { source, selected: chosen && chosen.id === source.id, onSelect: choose },
                             source.id
                           )
                       )
@@ -1079,7 +1131,7 @@ function PeripheralVisionPane({ ctx }) {
                         source =>
                           jsx(
                             WindowRow,
-                            { source, selected: chosen && chosen.id === source.id, onSelect: setChosen, ctx },
+                            { source, selected: chosen && chosen.id === source.id, onSelect: choose, ctx, enabled: gateOpen },
                             source.id
                           )
                       )
@@ -1102,7 +1154,7 @@ function PeripheralVisionPane({ ctx }) {
                         source =>
                           jsx(
                             SourceRow,
-                            { source, selected: chosen && chosen.id === source.id, onSelect: setChosen },
+                            { source, selected: chosen && chosen.id === source.id, onSelect: choose },
                             source.id
                           )
                       )

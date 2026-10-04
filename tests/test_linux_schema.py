@@ -30,6 +30,29 @@ for _name in ("cv2", "numpy"):
         _mod.CAP_PROP_FPS = 5
         sys.modules[_name] = _mod
 
+# pytest.approx inspects numpy itself (python_api calls np.isscalar); a numpy
+# stub missing the API pytest expects poisons every later test file that uses
+# approx, because sys.modules persists across the whole pytest process. Give
+# the stub the surface pytest actually touches.
+if "numpy" in sys.modules and not hasattr(sys.modules["numpy"], "isscalar"):
+    import numbers as _numbers
+
+    _np = sys.modules["numpy"]
+    _np.isscalar = lambda x: isinstance(x, _numbers.Number) or isinstance(x, (str, bytes, bool))
+    _np.number = _numbers.Number
+    _np.integer = int
+    _np.floating = float
+    _np.bool_ = bool
+    _np.ndarray = getattr(_np, "ndarray", object)
+    # approx() may route scalar-looking values through np.asarray; enough for floats.
+    def _asarray(x, dtype=None):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return x
+    _np.asarray = _asarray
+    _np.ndindex = lambda shape: iter([()])
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dashboard"))
 
 import capture_linux as L  # noqa: E402

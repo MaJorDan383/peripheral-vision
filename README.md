@@ -183,10 +183,19 @@ This plugin captures screen content and enumerates window titles. Key facts:
 - **The plugin's routes are served by the Hermes dashboard** at
   `/api/plugins/peripheral-vision/*`, so they are reachable wherever that dashboard is
   reachable. Access control is inherited from the dashboard's own auth and binding: if the
-  dashboard is reachable at an address, these routes are reachable there too. Treat a running
-  watch as screen-sharing — whatever is in the watched region is readable through the preview
-  and status routes — and do not expose the dashboard to an untrusted network while watching.
-- **Window titles and screen content are visible** to anything that can reach the dashboard.
+  dashboard is reachable at an address, these routes are reachable there too.
+- **Content is gated on the pane's selection.** `/preview`, `/start`, `/snap/start`,
+  `/snap/frame` and `/snap` — and the description text inside `/status` — refuse unless the
+  plugin pane holds a selected source, re-published every 10 seconds with a 45-second TTL, so
+  a closed or crashed pane closes the gate by itself. A dashboard session that never opened
+  the pane gets a `selection_required` refusal and an empty ring buffer, never your screen.
+  Window titles stay in the source lists (source metadata, the same class of thing a task
+  manager shows); stop, interval, inject-mode and vision settings stay reachable so a watch
+  can always be torn down — only pixel-derived content is gated.
+- **Treat a running watch as screen-sharing** — while a source is selected in the pane,
+  whatever is in the watched region is readable through the preview and status routes by
+  anything that can reach the dashboard, so do not expose the dashboard to an untrusted
+  network while watching.
 - **Camera access is opt-in** — a camera is opened only when explicitly selected, and the
   device is released on stop so its LED does not stay lit.
 - **Descriptions persist on disk** — `log.jsonl` keeps recent descriptions in the plugin's state

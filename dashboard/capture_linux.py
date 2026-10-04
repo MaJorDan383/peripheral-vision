@@ -25,6 +25,13 @@ from typing import Any, Optional
 import cv2
 import numpy as np
 
+from shared_state import (
+    CAM_LOCK as _CAM_LOCK,
+    CAM_HANDLE as _CAM_HANDLE,
+    CAM_PROBE_ABORT as _CAM_PROBE_ABORT,
+    CAMERA_CACHE as _CAMERA_CACHE,
+)
+
 # Lazy import for pipewire-capture (optional dependency)
 _PIPEWIRE_AVAILABLE = None
 
@@ -874,15 +881,37 @@ class LinuxCapture:
         return self._grab_monitor(source)
     
     def _grab_camera(self, source: dict):
-        """Capture from a camera. Returns a PIL Image."""
+        """Capture from a camera (held open between frames, like the Windows backend)."""
         index = source.get("index", 0)
-        cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            raise RuntimeError(f"Cannot open camera {index}")
-        
-        ret, frame = cap.read()
-        cap.release()
-        
+        with _CAM_LOCK:
+            cap = _CAM_HANDLE.get("cap")
+            if cap is None or _CAM_HANDLE.get("index") != index:
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+                if not cap.isOpened():
+                    cap.release()
+                    raise RuntimeError(f"Cannot open camera {index}")
+                _CAM_HANDLE["cap"] = cap
+                _CAM_HANDLE["index"] = index
+
+            try:
+                ret, frame = cap.read()
+            except Exception:
+                # The device may have been yanked: drop the handle so the next
+                # grab reopens rather than reading a dead capture forever.
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                if _CAM_HANDLE.get("cap") is cap:
+                    _CAM_HANDLE["cap"] = None
+                    _CAM_HANDLE["index"] = None
+                raise
+
         if not ret or frame is None:
             raise RuntimeError(f"Camera {index} returned empty frame")
         
@@ -1035,8 +1064,22 @@ def supports_snap_full_res() -> bool:
     return _get_linux_capture().supports_snap_full_res()
 
 
+def release_camera() -> None:
+    """Close the camera device so its LED turns off when watching stops."""
+    with _CAM_LOCK:
+        cap = _CAM_HANDLE.get("cap")
+        _CAM_HANDLE["cap"] = None
+        _CAM_HANDLE["index"] = None
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+
 def cleanup() -> None:
     global _linux_capture
+    release_camera()
     if _linux_capture:
         _linux_capture.cleanup()
         _linux_capture = None
