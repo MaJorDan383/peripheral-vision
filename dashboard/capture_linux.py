@@ -36,18 +36,6 @@ from shared_state import (
 _PIPEWIRE_AVAILABLE = None
 
 
-def _check_pipewire() -> bool:
-    """Check if pipewire-capture is available."""
-    global _PIPEWIRE_AVAILABLE
-    if _PIPEWIRE_AVAILABLE is not None:
-        return _PIPEWIRE_AVAILABLE
-    try:
-        from pipewire_capture import is_available
-        _PIPEWIRE_AVAILABLE = is_available()
-        return _PIPEWIRE_AVAILABLE
-    except ImportError:
-        _PIPEWIRE_AVAILABLE = False
-        return False
 
 
 _LOG = logging.getLogger("peripheral_vision.capture_linux")

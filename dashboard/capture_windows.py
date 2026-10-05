@@ -507,12 +507,6 @@ def _is_cloaked(hwnd: int) -> bool:
         return False
 
 
-def _root_window(hwnd: int) -> int:
-    try:
-        root = ctypes.windll.user32.GetAncestor(ctypes.c_void_p(hwnd), 3)
-        return int(root or hwnd)
-    except Exception:
-        return hwnd
 
 
 def list_windows(limit: int = 150) -> list[dict[str, Any]]:
@@ -869,22 +863,8 @@ def _is_blank(img) -> bool:
         return False
 
 
-def _frame_is_warmup(frame) -> bool:
-    """First frame after a source switch is often blank — treat it as warmup."""
-    return _is_blank(frame)
 
 
-def _is_unobstructed(hwnd: int, source: dict[str, Any]) -> bool:
-    """Check if the window is fully visible (not covered by other windows)."""
-    try:
-        user32 = ctypes.windll.user32
-        fg = user32.GetForegroundWindow()
-        if int(fg or 0) == hwnd:
-            return True
-        # Check if topmost or in foreground z-order
-        return False
-    except Exception:
-        return False
 
 
 # ── DWM thumbnail (for minimized windows) ─────────────────────────────────
@@ -958,18 +938,6 @@ def _thumb_host(width: int, height: int) -> int:
         return hwnd
 
 
-def _physical_rect(hwnd: int) -> Optional[tuple[int, int, int, int]]:
-    """Get the physical (DPI-aware) rect of a window."""
-    try:
-        rect = _RECT()
-        ok = ctypes.windll.dwmapi.DwmGetWindowAttribute(
-            ctypes.c_void_p(hwnd), ctypes.c_uint(9), ctypes.byref(rect), ctypes.sizeof(rect)
-        )
-        if ok != 0:
-            ctypes.windll.user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect))
-        return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
-    except Exception:
-        return None
 
 
 def _grab_window_thumbnail(source: dict[str, Any]):
