@@ -36,10 +36,15 @@ path, not through the package index.
 ## Running the tests
 
 ```bash
+scripts/check.sh                                # the whole gate: lint, then the suite
 .venv/Scripts/python.exe -m pytest tests/ -q    # Windows
 .venv/bin/python -m pytest tests/ -q            # POSIX
 python run_tests.py                             # the same run, from any interpreter with pytest
 ```
+
+`scripts/check.sh` runs `ruff check .` and then this suite — the same two commands CI runs, so
+one command locally means a green run in the pipeline. It needs `ruff` on `PATH` (an activated
+venv has it) and takes pytest arguments, e.g. `scripts/check.sh -x -k label`.
 
 The suite is **hermetic**: no desktop session, no camera, no model, no network, no Hermes
 install. Anything that would need one of those is stubbed at a seam instead.
