@@ -25,6 +25,9 @@ All notable changes to this plugin. Nothing before the first public release was 
   what describes frames is never a guess.
 - **The vision box names the watched source.** A small title line under the model line shows
   what the watch is looking at right now — display, window, or camera.
+- **A pre-commit hook runs the same lint gate as CI.** `.pre-commit-config.yaml` pins the ruff
+  version CI pins; `uvx pre-commit install` once per clone, then a commit that clears the hook
+  clears the lint job. The rule families and their rationale stay in `pyproject.toml`.
 
 ### Changed
 - **The pane's controls regrouped.** "check for changes" is now **Blink rate**; the

@@ -66,13 +66,18 @@ Consequences worth knowing before adding a test:
 ## Lint
 
 ```bash
-ruff check .
+ruff check .                # what CI runs
+uvx pre-commit install      # optional: the same check as a git hook
 ```
 
 `pyproject.toml` selects `F` (pyflakes), `E9` (real runtime errors) and `I` (import order) only.
 The wider pycodestyle/pylint families are intentionally off: this is a resilience-first capture
 layer where broad `except` blocks and best-effort fallbacks *are* the design, so enabling them
 would mostly mean suppressing them. `ruff format` is not enforced — match the surrounding code.
+
+`.pre-commit-config.yaml` pins the same ruff version, so a commit that clears the hook
+clears the lint job. That version lives in three places — the `ruff>=0.6` floor in the `dev`
+extra, the workflow's `ruff==...` pin, and the hook `rev` — so bump them together.
 
 CI runs the same command, so a clean local run means a green lint job.
 

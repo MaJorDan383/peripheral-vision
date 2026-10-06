@@ -1,0 +1,19 @@
+# Pre-commit gate: exactly the lint pass CI runs, but before the commit exists.
+#
+#   uvx pre-commit install          # once per clone, wires the git hook
+#   uvx pre-commit run --all-files  # what CI checks, on demand
+#   uvx pre-commit autoupdate       # bump the rev (then sync the other two pins)
+#
+# `rev` must track the ruff version pinned in .github/workflows/tests.yml and the
+# `ruff>=0.6` floor in pyproject.toml's `dev` extra — bump the three together, or CI
+# and the local hook disagree about what "clean" means.
+#
+# Static-only rules (F / E9 / I, see [tool.ruff.lint] in pyproject.toml): the fix is
+# safe to apply automatically, and `ruff format` is deliberately not enforced.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
