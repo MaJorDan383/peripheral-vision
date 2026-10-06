@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/MaJorDan383/peripheral-vision/security/advisories/new
+    about: Screen-content exposure or a weakness in the pane-selection gate — report privately, never in a public issue.
+  - name: Documentation
+    url: https://github.com/MaJorDan383/peripheral-vision#readme
+    about: Install, configuration, injection modes, manual snapshots and platform support.

@@ -1,12 +1,18 @@
 # Peripheral Vision
 
-Peripheral Vision is a Hermes plugin that keeps a live view of your screen, windows, and cameras, and feeds fresh descriptions to Hermes before each response. It turns your desktop into a persistent context source so Hermes can see what's on your screen, which window is focused, and what your cameras see — without you having to screenshot every time.
+[![tests](https://github.com/MaJorDan383/peripheral-vision/actions/workflows/tests.yml/badge.svg)](https://github.com/MaJorDan383/peripheral-vision/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platforms: Windows stable, Linux preview](https://img.shields.io/badge/platforms-Windows%20stable%20%C2%B7%20Linux%20preview-9cf.svg)](#platform-support)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
+[![Hermes 0.20.1+](https://img.shields.io/badge/Hermes-%E2%89%A50.20.1-8a63d2.svg)](plugin.yaml)
+
+Peripheral Vision is a plugin for [Hermes](https://hermes-agent.nousresearch.com/docs) that keeps a live view of your screen, windows, and cameras, and feeds fresh descriptions to Hermes before each response. It turns your desktop into a persistent context source so Hermes can see what's on your screen, which window is focused, and what your cameras see — without you having to screenshot every time.
 
 ## Features
 
-- **Monitor capture** — grabs frames from all connected displays via DWM
-- **Window capture** — captures specific applications by window handle
-- **Camera capture** — enumerates cameras (DSHOW) and grabs frames
+- **Display capture** — grabs whole displays: a GDI screen grab on Windows, `import`/`grim` or the desktop portal on Linux
+- **Window capture** — captures a single application window (PrintWindow on Windows, or a DWM thumbnail while it is minimized)
+- **Camera capture** — enumerates cameras and grabs frames (DirectShow on Windows, V4L2 on Linux)
 - **Vision routing** — sends frames to your auxiliary vision model when one is picked in
   Hermes' own settings, otherwise to the model the live session is running
 - **Pre-LLM context injection** — adds live descriptions to a turn through the `pre_llm_call` hook, gated by the inject mode (picked in the pane, or `PV_VISION_INJECT_MODE`) so a screen that has not moved does not pay for itself on every turn
@@ -37,7 +43,8 @@ Source, issues and releases: **https://github.com/MaJorDan383/peripheral-vision*
 
 ### Requirements
 - **Windows 10/11** (Win32/DWM/DirectShow) or **Linux** (see [Platform support](#platform-support);
-  macOS unsupported). See `docs/cross-platform-capture.md` for the exact per-session feature matrix.
+  macOS unsupported). See [docs/cross-platform-capture.md](docs/cross-platform-capture.md) for the exact per-session
+  feature matrix.
 - Python 3.9+
 - Hermes **0.20.1 or newer** (declared as `requires_hermes` in `plugin.yaml`). 0.20.1 is the
   oldest host that has everything the plugin calls — `ctx.on_unload` and the `pre_llm_call`
@@ -52,8 +59,19 @@ Source, issues and releases: **https://github.com/MaJorDan383/peripheral-vision*
   re-applies them after `hermes update`. To install them yourself instead:
   `pip install "opencv-python-headless>=4.5,<6" "Pillow>=10.0,<13" "openai>=1.0.0,<3"`
 
-### Quick install
-Copy the plugin directory into your Hermes plugins folder:
+### Install from the Hermes CLI (recommended)
+
+```bash
+hermes plugins install MaJorDan383/peripheral-vision --enable
+```
+
+Hermes fetches the repository, installs the declared dependencies, and — because of `--enable` —
+turns the plugin on in the same step, skipping the "Enable now?" prompt. Add `--yes-deps` when
+nothing can answer that prompt (CI, SSH automation, a container entrypoint).
+
+### Manual install
+
+Clone or download the repo, then copy the plugin directory into your plugins folder:
 
 **PowerShell (Windows):**
 ```powershell
@@ -73,13 +91,11 @@ Hermes loads a **standalone** plugin only when its key is listed under `plugins.
 directory you copied in stays inert — no capture, no context injection — until you say so:
 
 ```bash
-hermes plugins enable peripheral-vision
+hermes plugins enable peripheral-vision     # turn it on
+hermes plugins disable peripheral-vision    # turn it off without deleting anything
+hermes plugins list                         # state of everything installed
+hermes plugins show peripheral-vision       # version, hooks and details for this plugin
 ```
-
-`hermes plugins list` shows the state (`hermes plugins show peripheral-vision` for details), and
-`hermes plugins disable peripheral-vision` turns it off again without deleting anything.
-Installing through the CLI asks "Enable now? [y/N]" — answer `y`, or pass the flag up front:
-`hermes plugins install MaJorDan383/peripheral-vision --enable`.
 
 ## Configuration
 
@@ -228,20 +244,36 @@ exactly that pass-through). If descriptions arrive in another language, the mode
 (`PV_VISION_PROMPT`) is the thing to change — the plugin will not silently drop or translate a
 response.
 
-## License
-
-MIT License. See the `LICENSE` file for details.
-
 ## Development
 
-```bash
-# Install dev dependencies
-pip install pytest pytest-asyncio
+A Hermes install is not needed to work on the plugin — the suite is hermetic (no desktop session,
+no camera, no model, no network).
 
-# Run tests
-pytest tests/
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"       # Windows: .venv/Scripts/pip install -e ".[dev]"
+
+.venv/bin/python -m pytest tests/ -q    # Windows: .venv/Scripts/python.exe -m pytest tests/ -q
+ruff check .                            # the lint gate CI runs
 ```
+
+CI (`.github/workflows/tests.yml`) runs those same two commands: the test suite on Linux with
+Python 3.9/3.11/3.13 and on Windows with 3.11, plus the ruff lint job. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the file layout, the test seams, and the two scope rules
+(plugin-only, dependency-light).
+
+## Security
+
+A running watch is screen sharing. Read [SECURITY.md](SECURITY.md) before exposing the Hermes
+dashboard to any network you do not trust, and report anything that could expose captured content
+through a [private security advisory](https://github.com/MaJorDan383/peripheral-vision/security/advisories/new)
+rather than a public issue.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md).
+See [CHANGELOG.md](CHANGELOG.md). Each version is published as a
+[GitHub release](https://github.com/MaJorDan383/peripheral-vision/releases).

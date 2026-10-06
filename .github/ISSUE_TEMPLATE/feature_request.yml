@@ -1,0 +1,63 @@
+name: Feature request
+description: Suggest a capability, a capture path or a pane improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two constraints shape what can land here, so it helps to know them up front:
+
+        - **Plugin-only.** The plugin ships as a directory Hermes loads; it cannot require new
+          host or desktop-app APIs. If your idea needs one, say so — it may still be worth an
+          upstream issue, and the plugin can feature-detect it later.
+        - **Dependency-light.** Anything added to `pyproject.toml` is installed for every user.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you cannot do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: Rough is fine. A sketch of the pane behaviour or config value helps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including "do nothing" and any workaround you are using now.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which platforms does this affect?
+      multiple: true
+      options:
+        - Windows
+        - Linux — Wayland
+        - Linux — X11
+        - Pane UI only (platform-independent)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This can be implemented inside the plugin, without desktop-app changes.
+          required: false
+        - label: This needs a new runtime dependency (explain why in the proposal above).
+          required: false
+        - label: I am willing to test a build on my platform.
+          required: false

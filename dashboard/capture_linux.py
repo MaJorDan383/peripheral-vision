@@ -2,8 +2,9 @@
 Linux capture backend.
 
 Implements the cross-platform capture API using:
-- DRM/KMS or X11 for monitor enumeration
-- X11/Wayland (via pipewire-capture) for window enumeration and capture
+
+- xrandr (X11) for monitor enumeration; the XDG desktop portal on Wayland
+- X11 window ids, or the portal on Wayland, for window enumeration and capture
 - V4L2/OpenCV for camera capture
 """
 
@@ -18,25 +19,16 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import cv2
 import numpy as np
 
 from shared_state import (
-    CAM_LOCK as _CAM_LOCK,
     CAM_HANDLE as _CAM_HANDLE,
-    CAM_PROBE_ABORT as _CAM_PROBE_ABORT,
-    CAMERA_CACHE as _CAMERA_CACHE,
+    CAM_LOCK as _CAM_LOCK,
 )
-
-# Lazy import for pipewire-capture (optional dependency)
-_PIPEWIRE_AVAILABLE = None
-
-
-
 
 _LOG = logging.getLogger("peripheral_vision.capture_linux")
 
@@ -329,8 +321,6 @@ class LinuxCapture:
     
     def __init__(self):
         self._initialized = False
-        self._pipewire_session = None
-        self._pipewire_stream = None
         self._camera_cache = {}
         self._camera_cache_time = 0
         self._camera_probe_lock = threading.Lock()
@@ -786,6 +776,7 @@ class LinuxCapture:
                 )
                 if result.returncode == 0 and result.stdout:
                     import io
+
                     from PIL import Image
                     img = Image.open(io.BytesIO(result.stdout))
                     return img
@@ -802,6 +793,7 @@ class LinuxCapture:
             )
             if result.returncode == 0 and result.stdout:
                 import io
+
                 from PIL import Image
                 img = Image.open(io.BytesIO(result.stdout))
                 return img
@@ -842,9 +834,9 @@ class LinuxCapture:
     def _grab_window(self, source: dict):
         """Capture a window. Returns a PIL Image."""
         hwnd = source.get("hwnd")
-        x, y, w, h = _flat_rect(source)
+        _, _, w, h = _flat_rect(source)
         if not w or not h:
-            x, y, w, h = 0, 0, 1920, 1080
+            w, h = 1920, 1080
         
         # X11 window grabs — skipped on Wayland, where hwnd is a PID (there
         # is no X id) and hex(pid) could collide with a real Xwayland window.
@@ -858,6 +850,7 @@ class LinuxCapture:
                 )
                 if result.returncode == 0 and result.stdout:
                     import io
+
                     from PIL import Image
                     img = Image.open(io.BytesIO(result.stdout))
                     return img
@@ -978,19 +971,11 @@ class LinuxCapture:
         return True
     
     def cleanup(self) -> None:
-        """Release any held resources."""
-        if self._pipewire_stream:
-            try:
-                self._pipewire_stream.stop()
-            except Exception:
-                pass
-            self._pipewire_stream = None
-        if self._pipewire_session:
-            try:
-                self._pipewire_session.close()
-            except Exception:
-                pass
-            self._pipewire_session = None
+        """Release any held resources.
+
+        Nothing is held on Linux: the shared camera handle is released through
+        ``release_camera()``, and every grab is a short-lived subprocess.
+        """
 
 
 def _flat_rect(source: dict) -> tuple[int, int, int, int]:

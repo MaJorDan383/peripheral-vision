@@ -32,47 +32,41 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import ctypes
 import io
 import json
 import os
 import re
+
+# Cross-platform capture abstraction.
+# Use an absolute import for test compatibility (tests load via importlib without a package).
+import sys
 import threading
 import time
 import uuid
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Request
 
-# Cross-platform capture abstraction
-# Cross-platform capture abstraction
-# Use absolute import for test compatibility (tests load via importlib without package)
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from capture import (
-    list_monitors as capture_list_monitors,
-    list_windows as capture_list_windows,
-    list_cameras as capture_list_cameras,
-    list_sources as capture_list_sources,
-    grab as capture_grab,
-    release_camera as capture_release_camera,
-    is_minimized as capture_is_minimized,
-    get_window_rect as capture_get_window_rect,
-    supports_snap_full_res as capture_supports_snap_full_res,
-    cleanup as capture_cleanup,
-    probe_cameras_now as capture_probe_cameras_now,
-    cameras_probing as capture_cameras_probing,
     abort_camera_probe as capture_abort_camera_probe,
-    camera_source as capture_camera_source,
     camera_cache as capture_camera_cache,
-    window_iconic as capture_window_iconic,
-    window_rested as capture_window_rested,
     camera_open as capture_camera_open,
-    window_rect as capture_window_rect,
+    camera_source as capture_camera_source,
+    cameras_probing as capture_cameras_probing,
+    get_window_rect as capture_get_window_rect,
+    grab as capture_grab,
+    grab_window_thumbnail as capture_grab_window_thumbnail,
+    list_cameras as capture_list_cameras,
+    list_monitors as capture_list_monitors,
+    list_sources as capture_list_sources,
+    list_windows as capture_list_windows,
+    probe_cameras_now as capture_probe_cameras_now,
+    release_camera as capture_release_camera,
+    window_exe as capture_window_exe,
+    window_iconic as capture_window_iconic,
 )
 
 router = APIRouter()
@@ -245,7 +239,7 @@ class _SourceGone(RuntimeError):
 _GRAB_STATE = threading.local()  # per-thread: the watcher loop and the pane's previews must not mix
 
 # Thumbnail host state is shared with capture_windows via shared_state
-from shared_state import THUMB_HOST, THUMB_PROC, CAM_HANDLE, CAMERA_CACHE, GRAB_STATE, LAST_FRAMES, LAST_FRAME_LOCK
+from shared_state import CAM_HANDLE, THUMB_HOST, THUMB_PROC
 
 # Backwards-compatible alias for tests/older code.
 # Tests monkeypatch api._CAM_HANDLE["cap"].

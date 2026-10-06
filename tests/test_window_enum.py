@@ -124,7 +124,8 @@ def install(monkeypatch: pytest.MonkeyPatch):
         if not hasattr(ctypes, "windll"):
             pytest.skip("Windows-only (ctypes.windll)")
         fake = _FakeUser32(windows)
-        monkeypatch.setattr(api.ctypes.windll, "user32", fake)
+        # Patch the shared stdlib module: every backend reads ctypes.windll at call time.
+        monkeypatch.setattr(ctypes.windll, "user32", fake)
         monkeypatch.setattr(api, "_is_cloaked", lambda h: False)
         monkeypatch.setattr(api, "_window_rect", lambda h: (0, 0, 640, 480))
         monkeypatch.setattr(api, "_restored_rect", lambda h: None)

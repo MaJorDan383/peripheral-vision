@@ -12,8 +12,9 @@ import json
 import os
 import sys
 import types
-import pytest
 from pathlib import Path
+
+import pytest
 
 # capture_linux imports cv2/numpy at module scope; stub them when absent so the
 # parser contract stays testable on hosts without a camera stack.
@@ -346,7 +347,6 @@ def test_grab_on_wayland_skips_xwayland_root_and_ends_black(monkeypatch):
     and the result must be an EXACT-size black frame with a logged warning —
     never a silent wrong frame.
     """
-    import logging as _logging
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     monkeypatch.setattr(L, "_portal_screenshot", lambda timeout: None)
 

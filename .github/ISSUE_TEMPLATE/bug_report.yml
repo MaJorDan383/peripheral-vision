@@ -1,0 +1,111 @@
+name: Bug report
+description: Something is broken — capture, pane, injection, install or vision routing
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Before pasting anything:
+
+        - **No secrets.** No API keys, tokens or credentials.
+        - **Redact window titles** (and anything else on screen you would not want public) — they
+          are the most common accidental leak in capture reports.
+        - Check the [platform support table](https://github.com/MaJorDan383/peripheral-vision#platform-support):
+          Linux is preview, macOS is unsupported.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows 10/11
+        - Linux — GNOME/Wayland
+        - Linux — X11
+        - Linux — KDE/wlroots
+        - macOS (unsupported)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: From `plugin.yaml`, or `hermes plugins show peripheral-vision`
+      placeholder: "1.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: hermes-version
+    attributes:
+      label: Hermes version
+      description: Output of `hermes --version`. The plugin needs 0.20.1+ (0.21.4+ for OpenCode Zen/Go vision models).
+      placeholder: "0.21.4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it broke
+      options:
+        - Install / enable
+        - Source picker or preview
+        - Live watching (capture or change detection)
+        - Context injection into a turn
+        - Vision model routing
+        - Manual snapshot / crop overlay
+        - Camera
+        - Pane UI
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Select …
+        2. Set Blink rate to …
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Paste the error text rather than an image where you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics (optional, redacted)
+      description: |
+        Useful if you have it: the shell's stderr, and the relevant fields of
+        `$HERMES_HOME/cache/peripheral-vision/status.json` (the `method` field says how the last
+        frame was grabbed — `printwindow`, `screen`, `thumbnail`, `camera`).
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I am on the latest release and searched the existing issues.
+          required: true
+        - label: I have not included secrets, or screen content I would not want public.
+          required: true

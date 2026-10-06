@@ -17,8 +17,6 @@ import os
 import re
 import threading
 import time
-import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
@@ -123,9 +121,18 @@ class _MSG(ctypes.Structure):
 # ── Global state ────────────────────────────────────────────────────────────
 
 from shared_state import (
-    THUMB_HOST, THUMB_PROC, THUMB_LOCK, THUMB_EXECUTOR, THUMB_MAX_EDGE,
-    CAM_LOCK, CAM_HANDLE, CAM_PROBE_ABORT, CAMERA_CACHE,
-    GRAB_STATE, LAST_FRAMES, LAST_FRAME_LOCK,
+    CAM_HANDLE,
+    CAM_LOCK,
+    CAM_PROBE_ABORT,
+    CAMERA_CACHE,
+    GRAB_STATE,
+    LAST_FRAME_LOCK,
+    LAST_FRAMES,
+    THUMB_EXECUTOR,
+    THUMB_HOST,
+    THUMB_LOCK,
+    THUMB_MAX_EDGE,
+    THUMB_PROC,
 )
 
 _THUMB_HOST = THUMB_HOST
@@ -730,7 +737,7 @@ def _remember_frame(source: dict[str, Any], img: Any) -> None:
     key = _frame_key(source)
     try:
         import io
-        from PIL import Image
+
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         with _LAST_FRAME_LOCK:
@@ -801,7 +808,6 @@ def _dib_image(hdc: int, hbmp: int, width: int, height: int):
 
     buf_size = width * height * 4
     buf = ctypes.create_string_buffer(buf_size)
-    user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
 
     # GetDIBits from gdi32
@@ -815,8 +821,6 @@ def _dib_image(hdc: int, hbmp: int, width: int, height: int):
 
 def _grab_window_printwindow(source: dict[str, Any]):
     """Capture a window via PrintWindow (works for most non-minimized windows)."""
-    from PIL import Image
-
     hwnd = source.get("hwnd")
     if not hwnd:
         raise RuntimeError("No hwnd in source")
@@ -835,9 +839,8 @@ def _grab_window_printwindow(source: dict[str, Any]):
     hdc = gdi32.CreateCompatibleDC(0)
     hbmp = gdi32.CreateCompatibleBitmap(hdc, width, height)
     try:
-        old_hdc = user32.SetWindowPos  # no-op; we need a compatible DC
-        # Create a fresh DC for the bitmap
-        ps = gdi32.SelectObject(hdc, hbmp)
+        # Select the bitmap into the DC so PrintWindow renders into it
+        gdi32.SelectObject(hdc, hbmp)
         # PrintWindow with PW_RENDERFULLCONTENT (0x2)
         ok = user32.PrintWindow(ctypes.c_void_p(hwnd), hdc, 2)
         if not ok:
@@ -942,8 +945,6 @@ def _thumb_host(width: int, height: int) -> int:
 
 def _grab_window_thumbnail(source: dict[str, Any]):
     """Capture a window via DWM thumbnail API (works for minimized windows)."""
-    from PIL import Image
-
     hwnd = source.get("hwnd")
     if not hwnd:
         raise RuntimeError("No hwnd in source")

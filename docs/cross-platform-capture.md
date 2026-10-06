@@ -16,7 +16,7 @@ session type can and cannot do.
 - **No single capture library delivers parity on both OSes.** mss / Pillow / pyscreenshot are
   monitors-only on Linux, X11-only (broken on Wayland), and cannot grab a single window.
 - **The plugin as a whole can work on both** — and on Windows nothing needs to change. The
-  OS-specific surface is six small primitives; everything above them (source model, crop
+  OS-specific surface is five small primitives; everything above them (source model, crop
   overlay, snapshot session, payloads, pane JS, last-frame cache, PNG save, camera) is already
   portable. The cross-OS layer is the *interface* (a still-frame contract), not one library.
 - On Linux the display server decides the ceiling:
@@ -28,16 +28,15 @@ session type can and cannot do.
     restore tokens). Steady-state 30-60 ms per frame, native resolution, one code path across
     GNOME/KDE/wlroots — this is the officially supported API and the stable choice.
 
-## The Windows-only surface today (all in dashboard/plugin_api.py)
+## The Windows-only surface (all in `dashboard/capture_windows.py`)
 
 | # | Primitive | Used for |
 |---|-----------|----------|
 | 1 | EnumDisplayMonitors / GetMonitorInfoW | display sources |
 | 2 | EnumWindows + IsIconic | window source list, minimized flag |
-| 3 | DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) / GetWindowPlacement | window geometry |
+| 3 | DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) / GetWindowRect / GetWindowPlacement | window geometry |
 | 4 | PrintWindow(PW_RENDERFULLCONTENT) / GetDIBits | capture (occluded windows, stills) |
-| 5 | WindowFromPoint + z-order probe | obstructed-window detection |
-| 6 | DwmRegisterThumbnail (off-screen host + PrintWindow) | minimized-window last frame |
+| 5 | DwmRegisterThumbnail (off-screen host + PrintWindow) | minimized-window last frame |
 
 ## Linux equivalents
 
@@ -65,7 +64,13 @@ session type can and cannot do.
 - **XWayland + X11 grabs**: XWayland's root window has no pixels and native Wayland windows
   are invisible to X11 clients — do not rely on it.
 
-## Recommended architecture if this is built
+## Tiered architecture (target design)
+
+Tiers 1 and 2 are what shipped, with one substitution: the Linux backends shell out to the
+platform CLIs (`xrandr`, `wmctrl`, `import`, `grim`) instead of linking python-xlib, because those
+CLIs are already present on the desktops that have them and cost no dependency. Tier 3 (the
+PipeWire ScreenCast fast path) is designed, not implemented — live Wayland grabs use the one-shot
+portal screenshot, which is the ~1.5-3.2 s cost the README calls out (tracking: issue #1).
 
 A capability-tiered capture backend behind the existing seams (`_grab`, window enumeration,
 grab-state probes), selected once at import time by session type

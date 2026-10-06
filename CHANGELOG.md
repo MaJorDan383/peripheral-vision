@@ -49,6 +49,32 @@ All notable changes to this plugin. Nothing before the first public release was 
   so a poll that lands mid-restore can never adopt a clipped band — and the frozen DWM frame
   sharpens into a live full-resolution capture, no Retake.
 
+### Fixed
+- **Two undefined names in the snapshot seams.** `plugin_api._thumb_capture` called
+  `capture_grab_window_thumbnail`, and `plugin_api._window_exe` called `capture_window_exe`;
+  neither name was bound in that module, so a minimized-window thumbnail grab on the live path
+  would have raised `NameError`. Both are now imported under their `capture_*` names, so the
+  seams resolve at runtime while the tests keep monkeypatching them.
+- **Stale capture-backend leftovers.** An unused PipeWire session/stream pair in the Linux
+  backend (the fast path was never implemented — `cleanup()` now says what it actually holds,
+  which is nothing), a no-op `SetWindowPos` and a dead DC binding in the PrintWindow grab, and
+  unused imports and locals across both backends.
+
+### Changed
+- **Lint gate added.** `ruff` (`F`, `E9`, `I` only) now runs in CI and is documented in
+  [CONTRIBUTING.md](CONTRIBUTING.md); the test matrix also runs on Windows, not just Linux.
+- **Five unreferenced private helpers removed** from the capture backends (a PipeWire probe
+  along with four Windows window-geometry helpers). Verified unreferenced across the plugin,
+  the tests and the pane before removal; the suite is unchanged at 132 passed, 1 skipped.
+- **Documentation set.** `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue forms, a
+  pull-request template and a README badge row, alongside corrections where the docs had drifted
+  from the code (the Windows capture primitives table, the install path, and the Linux
+  dependency list).
+
+### Removed
+- The declared `linux` extra (`pipewire-capture`), which no code imports. The PipeWire ScreenCast
+  fast path is still tracked in [#1](https://github.com/MaJorDan383/peripheral-vision/issues/1).
+
 ## [1.3.0] - 2026-09-23
 
 ### Added
