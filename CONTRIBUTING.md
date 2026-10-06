@@ -50,6 +50,7 @@ install. Anything that would need one of those is stubbed at a seam instead.
 | `plugin_api._thumb_capture` | minimized-window thumbnails, without the DWM thumbnail host |
 | `ctypes.windll.user32` (monkeypatched in `tests/test_window_enum.py`) | full window enumeration, against a fake user32 that records call order |
 | `tests/test_linux_schema.py` | stubs `cv2`/`numpy` so the Linux parser contract is testable without a camera stack |
+| `capture_linux._window_exe` | the app-name lookup behind a window label (it reads the host's `/proc/<pid>`) |
 
 Consequences worth knowing before adding a test:
 
@@ -57,6 +58,10 @@ Consequences worth knowing before adding a test:
   and `pytest.skip("POSIX only")` are the established patterns, and CI runs Linux *and* Windows.
 - **A test that needs a real screen, window or camera does not belong in CI.** If behaviour can
   only be observed live, say so in the PR and keep a stubbed unit test for the logic around it.
+- **Pin every host lookup.** A test that reads the machine it runs on is a flake with a delay on
+  it: a label built from `/proc/<pid>` passed for weeks because pid 1234 happened to be free,
+  then failed on a runner where it was not. If production reads the host, the test patches the
+  read.
 
 ## Lint
 

@@ -120,7 +120,11 @@ def test_xrandr_monitor_schema_and_position():
     assert monitors[1]["primary_label"] == ""
 
 
-def test_wmctrl_window_schema_pid_and_title():
+def test_wmctrl_window_schema_pid_and_title(monkeypatch):
+    # The app name comes from the host's /proc/<pid>, so pin it: otherwise a real
+    # process sitting at the fixture's pid leaks into the label (CI's pid 1234 was
+    # a runner process, and the label came back "cleanup — ...").
+    monkeypatch.setattr(L, "_window_exe", lambda pid: "")
     windows = L.LinuxCapture()._parse_wmctrl(WMCTRL_PID)
     # xfce4-panel (48x48) is below the size floor.
     assert len(windows) == 1
@@ -131,6 +135,23 @@ def test_wmctrl_window_schema_pid_and_title():
     assert (w["x"], w["y"], w["width"], w["height"]) == (746, 443, 468, 205)
     # Label follows Windows: "<app> — <title>", falling back to "window".
     assert w["label"] == "window — Niet-opgeslagen document 1 - gedit"
+
+
+def test_window_label_uses_the_resolved_app_name(monkeypatch):
+    monkeypatch.setattr(L, "_window_exe", lambda pid: "firefox")
+    w = L.LinuxCapture()._window(
+        hwnd=42, pid=4321, title="Docs", x=0, y=0, width=800, height=600,
+    )
+    assert w["exe"] == "firefox"
+    assert w["label"] == "firefox — Docs"
+
+
+def test_window_label_without_pid_or_title_falls_back_to_the_handle():
+    w = L.LinuxCapture()._window(
+        hwnd=42, pid=0, title="", x=0, y=0, width=800, height=600,
+    )
+    assert w["exe"] == ""
+    assert w["label"] == "Window 42"
 
 
 def test_wmctrl_without_pid_column_keeps_full_title():
