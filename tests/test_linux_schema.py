@@ -463,3 +463,270 @@ def test_xenv_resolves_mutter_xwayland_cookie(monkeypatch, tmp_path):
 
     monkeypatch.setenv("XAUTHORITY", "/explicit/auth")
     assert L._xenv().get("XAUTHORITY") == "/explicit/auth"
+
+
+# ---------------------------------------------------------------------------
+# PipeWire ScreenCast tier (v1.5.0): portal session + pipewiresrc pipeline.
+# ---------------------------------------------------------------------------
+
+def test_pipewire_probe_rejects_non_wayland(monkeypatch):
+    """probe() must fail fast on X11 — no gst-inspect, no portal call."""
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    import capture_pipewire as pw
+    result = pw.probe(refresh=True)
+    assert result["ok"] is False
+    assert "not a Wayland" in result["reason"]
+
+
+def test_pipewire_probe_rejects_missing_gst(monkeypatch):
+    """probe() must fail when gst-launch-1.0 is not on PATH."""
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    import capture_pipewire as pw
+    monkeypatch.setattr(pw.shutil, "which", lambda name: None)
+    result = pw.probe(refresh=True)
+    assert result["ok"] is False
+    assert "gst-launch" in result["reason"]
+
+
+def test_pipewire_probe_rejects_missing_pipewiresrc(monkeypatch):
+    """probe() must fail when gst-inspect cannot find pipewiresrc."""
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    import capture_pipewire as pw
+
+    def fake_which(name):
+        return "/usr/bin/gst-launch-1.0" if name == "gst-launch-1.0" else None
+
+    class FakeResult:
+        returncode = 1
+        stdout = ""
+        stderr = "No such element"
+
+    monkeypatch.setattr(pw.shutil, "which", fake_which)
+    monkeypatch.setattr(pw.subprocess, "run", lambda *a, **k: FakeResult())
+    result = pw.probe(refresh=True)
+    assert result["ok"] is False
+    assert "pipewiresrc" in result["reason"]
+
+
+def test_pipewire_probe_succeeds(monkeypatch):
+    """probe() must succeed when gst + pipewiresrc are present."""
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    import capture_pipewire as pw
+
+    def fake_which(name):
+        return f"/usr/bin/{name}"
+
+    class FakeResult:
+        returncode = 0
+        stdout = "pipewiresrc: PipeWire Source"
+        stderr = ""
+
+    monkeypatch.setattr(pw.shutil, "which", fake_which)
+    monkeypatch.setattr(pw.subprocess, "run", lambda *a, **k: FakeResult())
+    result = pw.probe(refresh=True)
+    assert result["ok"] is True
+    assert result["gst"] == "/usr/bin/gst-launch-1.0"
+    assert result["reason"] == ""
+
+
+def test_pipewire_frame_returns_none_without_python(monkeypatch):
+    """frame() must return None when no PyGObject python is available."""
+    import capture_pipewire as pw
+    result = pw.frame("monitor", "monitor-0", python=None, timeout=0.1)
+    assert result is None
+    assert "PyGObject" in pw.note()
+
+
+def test_pipewire_frame_returns_none_when_probe_fails(monkeypatch):
+    """frame() must return None when the probe says no."""
+    import capture_pipewire as pw
+    monkeypatch.setattr(pw, "probe", lambda *a, **k: {"ok": False, "reason": "no gst", "gst": None})
+    result = pw.frame("monitor", "monitor-0", python="/usr/bin/python3", timeout=0.1)
+    assert result is None
+    assert "no gst" in pw.note()
+
+
+def test_pipewire_live_frame_returns_none_without_session(monkeypatch):
+    """live_frame() must return None when no session is running."""
+    import capture_pipewire as pw
+    with pw._LOCK:
+        pw._SESSIONS.clear()
+    result = pw.live_frame("monitor", "monitor-0", timeout=0.1)
+    assert result is None
+
+
+def test_pipewire_state_reports_unsupported_on_x11(monkeypatch):
+    """state() must report 'unsupported' on X11."""
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    import capture_pipewire as pw
+    result = pw.state(refresh=True)
+    assert result["state"] == "unsupported"
+    assert result["method"] == ""
+
+
+def test_pipewire_state_reports_available_on_wayland(monkeypatch):
+    """state() must report 'available' when probe succeeds."""
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    import capture_pipewire as pw
+
+    def fake_which(name):
+        return f"/usr/bin/{name}"
+
+    class FakeResult:
+        returncode = 0
+        stdout = "pipewiresrc: PipeWire Source"
+        stderr = ""
+
+    monkeypatch.setattr(pw.shutil, "which", fake_which)
+    monkeypatch.setattr(pw.subprocess, "run", lambda *a, **k: FakeResult())
+    result = pw.state()
+    assert result["state"] == "available"
+    assert result["method"] == "pipewire"
+
+
+def test_pipewire_shutdown_clears_sessions(monkeypatch):
+    """shutdown() must stop all sessions and clear state."""
+    import capture_pipewire as pw
+
+    class FakeSession:
+        def __init__(self):
+            self.stopped = False
+        def stop(self):
+            self.stopped = True
+
+    with pw._LOCK:
+        pw._SESSIONS["monitor-0"] = FakeSession()
+    pw.shutdown()
+    with pw._LOCK:
+        assert len(pw._SESSIONS) == 0
+
+
+def test_pipewire_key_distinguishes_monitors_and_windows():
+    """_pipewire_key must produce different keys for monitors vs windows."""
+    from capture_linux import _pipewire_key
+    mon = _pipewire_key({"kind": "monitor", "index": 0})
+    win = _pipewire_key({"kind": "window", "hwnd": 1234})
+    assert mon == "monitor-0"
+    assert win == "window-1234"
+    assert mon != win
+
+
+def test_capture_state_includes_screencast_on_wayland(monkeypatch):
+    """list_sources() must include capture state with screencast info on Wayland."""
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    import capture_pipewire as pw
+
+    def fake_which(name):
+        return f"/usr/bin/{name}"
+
+    class FakeResult:
+        returncode = 0
+        stdout = "pipewiresrc: PipeWire Source"
+        stderr = ""
+
+    monkeypatch.setattr(pw.shutil, "which", fake_which)
+    monkeypatch.setattr(pw.subprocess, "run", lambda *a, **k: FakeResult())
+    src = L.list_sources()
+    assert "capture" in src
+    assert "screencast" in src["capture"]
+    assert src["capture"]["screencast"]["method"] == "pipewire"
+
+
+def test_capture_state_reports_x11_on_non_wayland(monkeypatch):
+    """list_sources() must report X11 capture state when not on Wayland."""
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    src = L.list_sources()
+    assert "capture" in src
+    assert src["capture"]["platform"] == "x11"
+    assert src["capture"]["screencast"]["state"] == "unsupported"
+
+
+def test_grab_monitor_tries_pipewire_live_first(monkeypatch):
+    """On Wayland, grab() must try live_frame before any subprocess."""
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    import capture_pipewire as pw
+
+    calls = []
+
+    def fake_live_frame(kind, key, timeout=0.5):
+        calls.append("live_frame")
+        return None
+
+    def fake_frame(kind, key, python, timeout=1.5):
+        calls.append("frame")
+        return None
+
+    monkeypatch.setattr(pw, "live_frame", fake_live_frame)
+    monkeypatch.setattr(pw, "frame", fake_frame)
+    monkeypatch.setattr(L, "_portal_screenshot", lambda timeout: None)
+
+    def fake_run(cmd, **kwargs):
+        calls.append("subprocess")
+        class R:
+            returncode = 1
+            stdout = b""
+        return R()
+
+    monkeypatch.setattr(L.subprocess, "run", fake_run)
+    L.LinuxCapture().grab({"kind": "monitor", "x": 0, "y": 0, "width": 100, "height": 100})
+    assert calls[0] == "live_frame", f"Expected live_frame first, got {calls}"
+
+
+def test_grab_window_tries_pipewire_before_region_fallback(monkeypatch):
+    """On Wayland, window grab must try ScreenCast before region fallback."""
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    import capture_pipewire as pw
+
+    calls = []
+
+    def fake_live_frame(kind, key, timeout=0.5):
+        calls.append("live_frame")
+        return None
+
+    def fake_frame(kind, key, python, timeout=1.5):
+        calls.append("frame")
+        return None
+
+    monkeypatch.setattr(pw, "live_frame", fake_live_frame)
+    monkeypatch.setattr(pw, "frame", fake_frame)
+    monkeypatch.setattr(L, "_portal_screenshot", lambda timeout: None)
+
+    def fake_run(cmd, **kwargs):
+        calls.append("subprocess")
+        class R:
+            returncode = 1
+            stdout = b""
+        return R()
+
+    monkeypatch.setattr(L.subprocess, "run", fake_run)
+    L.LinuxCapture().grab({"kind": "window", "hwnd": 1234, "x": 0, "y": 0,
+                           "width": 100, "height": 100})
+    assert "live_frame" in calls, f"Expected live_frame in calls, got {calls}"
+    assert "frame" in calls, f"Expected frame in calls, got {calls}"
+
+
+def test_cleanup_stops_pipewire_sessions(monkeypatch):
+    """cleanup() must stop any running PipeWire sessions."""
+    import capture_pipewire as pw
+
+    class FakeSession:
+        def __init__(self):
+            self.stopped = False
+        def stop(self):
+            self.stopped = True
+
+    with pw._LOCK:
+        pw._SESSIONS["monitor-0"] = FakeSession()
+    L.LinuxCapture().cleanup()
+    with pw._LOCK:
+        assert len(pw._SESSIONS) == 0

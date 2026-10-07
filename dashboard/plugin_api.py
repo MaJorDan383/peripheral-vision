@@ -236,10 +236,12 @@ class _SourceGone(RuntimeError):
 
 
 # ── Grab dispatcher (cross-platform; pixels come from the backend) ───────
-_GRAB_STATE = threading.local()  # per-thread: the watcher loop and the pane's previews must not mix
+# Thumbnail + grab state live in shared_state so the capture backends can report
+# how a frame was obtained (``method``) and why it is not live (``waiting``)
+# through the same per-thread object this module reads.
+from shared_state import CAM_HANDLE, GRAB_STATE, THUMB_HOST, THUMB_PROC
 
-# Thumbnail host state is shared with capture_windows via shared_state
-from shared_state import CAM_HANDLE, THUMB_HOST, THUMB_PROC
+_GRAB_STATE = GRAB_STATE  # per-thread: the watcher loop and the pane's previews must not mix
 
 # Backwards-compatible alias for tests/older code.
 # Tests monkeypatch api._CAM_HANDLE["cap"].

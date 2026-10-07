@@ -5,6 +5,9 @@ Implements the cross-platform capture API using:
 
 - xrandr (X11) for monitor enumeration; the XDG desktop portal on Wayland
 - X11 window ids, or the portal on Wayland, for window enumeration and capture
+- a portal ScreenCast (PipeWire) stream when one can be opened: the only route
+  to a window's own pixels on Wayland, and the cheapest way to keep a monitor
+  warm once the user has allowed it once (see ``capture_pipewire``)
 - V4L2/OpenCV for camera capture
 """
 
@@ -28,6 +31,7 @@ import numpy as np
 from shared_state import (
     CAM_HANDLE as _CAM_HANDLE,
     CAM_LOCK as _CAM_LOCK,
+    GRAB_STATE as _GRAB_STATE,
 )
 
 _LOG = logging.getLogger("peripheral_vision.capture_linux")
@@ -38,6 +42,16 @@ _LOG = logging.getLogger("peripheral_vision.capture_linux")
 # loop cannot spam consent dialogs.
 _PORTAL_STATE = {"primed": False, "fail_at": 0.0}
 _HELPER_PY = {"checked": False, "path": None}
+
+
+def _method(name: str) -> None:
+    """Record how this thread's frame was obtained (the pane displays it)."""
+    _GRAB_STATE.method = name
+
+
+def _waiting(reason: str) -> None:
+    """Record why this thread's frame is late or wrong (the pane displays it)."""
+    _GRAB_STATE.waiting = reason
 
 
 def _is_wayland() -> bool:
@@ -314,6 +328,78 @@ def _run_atspi(timeout: float = 15.0) -> Optional[str]:
     return result.stdout
 
 
+
+
+def _pipewire_key(source: dict) -> str:
+    """A stable stream key per watched source (monitors and windows differ)."""
+    kind = source.get("kind") or "monitor"
+    ident = source.get("index") if kind == "monitor" else source.get("hwnd")
+    return f"{kind}-{ident if ident is not None else 0}"
+
+
+def _pipewire_frame(source: dict, live_only: bool = False):
+    """A frame from the portal's ScreenCast stream, or None with a reason set.
+
+    ``live_only`` never opens a session — it only reads a stream that is already
+    running, so the fast path costs nothing when ScreenCast is not in use.
+    """
+    try:
+        import capture_pipewire
+    except ImportError as exc:  # pragma: no cover - the module ships with the plugin
+        _LOG.debug("pipewire tier unavailable: %s", exc)
+        return None
+    kind = "monitor" if (source.get("kind") or "monitor") == "monitor" else "window"
+    python = _helper_python()
+    img = (
+        capture_pipewire.live_frame(kind, _pipewire_key(source), timeout=1.0)
+        if live_only
+        else capture_pipewire.frame(kind, _pipewire_key(source), python, timeout=1.5)
+    )
+    if img is None:
+        note = capture_pipewire.note() or capture_pipewire.state(python)["reason"]
+        if note:
+            _waiting(note)
+    return img
+
+
+def _capture_reason() -> str:
+    """Why no live capture path exists right now, for the pane's status line."""
+    notes = []
+    if _is_wayland():
+        try:
+            import capture_pipewire
+            note = capture_pipewire.note() or capture_pipewire.state(_helper_python())["reason"]
+            if note:
+                notes.append(note)
+        except ImportError:
+            pass
+        if _PORTAL_STATE.get("fail_at"):
+            notes.append("the screenshot portal was refused")
+        if not _HELPER_PY.get("path"):
+            notes.append("no python3 with PyGObject (gi) for the portal helper")
+    else:
+        notes.append("ImageMagick (import) is unavailable")
+    return "; ".join(notes) or "no capture backend is available"
+
+
+def _capture_state() -> dict:
+    """What the capture tiers are doing here, for the pane's HUD."""
+    state = {
+        "platform": "wayland" if _is_wayland() else "x11",
+        "method": getattr(_GRAB_STATE, "method", "") or "",
+        "waiting": getattr(_GRAB_STATE, "waiting", "") or "",
+    }
+    if not _is_wayland():
+        state["screencast"] = {"method": "", "state": "unsupported", "sessions": [],
+                               "reason": "X11 grabs the root window directly", "note": ""}
+    else:
+        try:
+            import capture_pipewire
+            state["screencast"] = capture_pipewire.state(_helper_python())
+        except ImportError as exc:  # pragma: no cover - the module ships with the plugin
+            state["screencast"] = {"method": "", "state": "unsupported", "sessions": [],
+                                   "reason": str(exc), "note": ""}
+    return state
 
 
 class LinuxCapture:
@@ -742,10 +828,13 @@ class LinuxCapture:
             "windows": windows,
             "cameras": cameras,
             "count": len(monitors) + len(windows) + len(cameras),
+            "capture": _capture_state(),
         }
     
     def grab(self, source: dict):
         """Capture a frame from the given source. Returns a PIL Image."""
+        _method("")
+        _waiting("")
         kind = source.get("kind")
         
         if kind == "monitor":
@@ -763,6 +852,13 @@ class LinuxCapture:
         if not w or not h:
             x, y, w, h = 0, 0, 1920, 1080
 
+        # A stream that is already running is the cheapest correct frame on
+        # Wayland: no subprocess, no encode/decode round trip, no dialog.
+        if _is_wayland():
+            img = _pipewire_frame(source, live_only=True)
+            if img is not None:
+                return img
+
         # X11: ImageMagick grabs the root window. Skipped on Wayland — the
         # Xwayland root holds only the X11 subtree, so it "succeeds" with a
         # wrong (often blank) frame instead of failing.
@@ -779,6 +875,7 @@ class LinuxCapture:
 
                     from PIL import Image
                     img = Image.open(io.BytesIO(result.stdout))
+                    _method("x11")
                     return img
             except (FileNotFoundError, subprocess.TimeoutExpired, ImportError):
                 pass
@@ -796,9 +893,18 @@ class LinuxCapture:
 
                 from PIL import Image
                 img = Image.open(io.BytesIO(result.stdout))
+                _method("grim")
                 return img
         except (FileNotFoundError, subprocess.TimeoutExpired, ImportError):
             pass
+
+        # A fresh portal ScreenCast. On mutter this replaces the screenshot
+        # portal's full-screen PNG plus crop with the compositor's own stream,
+        # and persist_mode means only the first watch asks the user anything.
+        if _is_wayland():
+            img = _pipewire_frame(source)
+            if img is not None:
+                return img
 
         # GNOME/mutter: the xdg-desktop-portal — the only non-interactive
         # capture path mutter offers unprivileged clients (grim needs
@@ -812,6 +918,7 @@ class LinuxCapture:
                     # The portal saves the whole virtual screen; crop to rect.
                     if x >= 0 and y >= 0 and x + w <= img.width and y + h <= img.height:
                         img = img.crop((x, y, x + w, y + h))
+                    _method("portal")
                     return img
                 except Exception as exc:
                     _LOG.debug("portal frame unreadable: %s", exc)
@@ -823,10 +930,11 @@ class LinuxCapture:
 
         # Last resort: a black frame — LOUDLY. A silently black watch feed was
         # how a dead capture backend stayed invisible.
+        reason = _capture_reason()
+        _method("black")
         _LOG.warning(
-            "no working capture path for rect %sx%s+%s+%s "
-            "(import/grim unavailable or portal denied) — returning a black frame",
-            w, h, x, y,
+            "no working capture path for rect %sx%s+%s+%s (%s) — returning a black frame",
+            w, h, x, y, reason,
         )
         from PIL import Image
         return Image.new("RGB", (max(1, w), max(1, h)), (0, 0, 0))
@@ -857,9 +965,22 @@ class LinuxCapture:
             except (FileNotFoundError, subprocess.TimeoutExpired, ImportError):
                 pass
 
+        # Wayland: only ScreenCast returns the window's *own* pixels. The
+        # Screenshot portal and grim can only crop the screen region the window
+        # occupies, which shows whatever else is drawn on top of it.
+        if _is_wayland():
+            img = _pipewire_frame(source, live_only=True) or _pipewire_frame(source)
+            if img is not None:
+                return img
+
         # Fallback: capture the screen region the window occupies — on Wayland
         # that resolves to a portal/grim crop of the window's AT-SPI rect.
-        return self._grab_monitor(source)
+        img = self._grab_monitor(source)
+        _method("region")
+        if _is_wayland():
+            _waiting("window streaming is not available here — showing the window's "
+                     "screen region, which other windows can cover")
+        return img
     
     def _grab_camera(self, source: dict):
         """Capture from a camera (held open between frames, like the Windows backend)."""
@@ -973,9 +1094,16 @@ class LinuxCapture:
     def cleanup(self) -> None:
         """Release any held resources.
 
-        Nothing is held on Linux: the shared camera handle is released through
-        ``release_camera()``, and every grab is a short-lived subprocess.
+        Nothing is held on Linux beyond an optional ScreenCast stream: the shared
+        camera handle is released through ``release_camera()``, every still grab
+        is a short-lived subprocess, and any open stream is stopped here —
+        killing its pipeline is what ends the portal session.
         """
+        try:
+            import capture_pipewire
+            capture_pipewire.shutdown()
+        except ImportError:  # pragma: no cover - the module ships with the plugin
+            pass
 
 
 def _flat_rect(source: dict) -> tuple[int, int, int, int]:
