@@ -816,3 +816,18 @@ def test_sources_route_passes_the_capture_block_through(monkeypatch):
     body = asyncio.run(api.get_sources())
     assert body["capture"] == sentinel
     assert body["count"] == 0
+
+
+def test_probe_reasons_are_the_documented_ones():
+    """Guard the README table against drift: these strings are what users grep for."""
+    import pathlib
+
+    import capture_pipewire as pw
+    source = pathlib.Path(pw.__file__).read_text(encoding="utf-8")
+    for reason in (
+        "not a Wayland session",
+        "not found (install gstreamer1.0-tools)",
+        "gstreamer pipewiresrc missing",
+        "no python3 with PyGObject (gi) for the portal helper",
+    ):
+        assert reason in source, f"README documents a reason the probe no longer emits: {reason}"

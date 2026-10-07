@@ -90,6 +90,26 @@ saying whether a stream is available, the watch status carries the `grab_method`
 current frame, and the pane's status line names the reason whenever a frame is not live — for
 example a window being shown as a screen region because no window stream is running.
 
+If a stream never turns on, the `capture` block in `GET /sources` carries the reason — and the same
+answer comes from the probe, run on the machine that has the Wayland session. It needs nothing but
+`python3`:
+
+```bash
+cd "<hermes home>/plugins/peripheral-vision"   # the folder Hermes installed the plugin into
+python3 -c "import sys; sys.path.insert(0, 'dashboard'); import capture_pipewire as p; \
+  print(p.probe(refresh=True)['reason'] or 'screencast: ready')"
+```
+
+| It prints | What is missing |
+| --- | --- |
+| `not a Wayland session` | an X11 session — expected, X11 has its own tier |
+| `gst-launch-1.0 not found (install gstreamer1.0-tools)` | the `gstreamer1.0-tools` package |
+| `gstreamer pipewiresrc missing (install gstreamer1.0-pipewire + gst-plugins-good)` | `gstreamer1.0-pipewire` |
+| `no python3 with PyGObject (gi) for the portal helper` | `python3-gi` |
+| `screen sharing was declined` | the picker was dismissed — nothing is captured until it is answered |
+
+All of these are fallbacks rather than failures: capture carries on through the screenshot tier.
+
 ### Install from the Hermes CLI (recommended)
 
 ```bash

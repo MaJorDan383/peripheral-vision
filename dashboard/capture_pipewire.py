@@ -15,8 +15,8 @@ and :func:`shutdown` kills the process, which is what ends the portal session.
 
 Nothing here is fatal. When the probe fails — X11, no portal ScreenCast, no
 ``gstreamer1.0-pipewire``, no gobject-introspection python — the Linux backend
-keeps its grim and Screenshot tiers, and the reason is reported by
-:func:`state` so the pane can say why instead of showing a black frame.
+keeps its grim and Screenshot tiers; the reason is reported by :func:`state` for
+``/sources``, and reaches the pane as the reason a frame is not live.
 """
 
 from __future__ import annotations
