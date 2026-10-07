@@ -29,11 +29,14 @@ Peripheral Vision is a plugin for [Hermes](https://hermes-agent.nousresearch.com
 | **macOS** | ❌ Unsupported | Not implemented; the installer refuses on `darwin`. |
 
 **Linux preview caveats:**
-- **Grab speed:** each frame goes through a one-shot portal screenshot (~1.5–3.2 s), so a watch
-  loop runs slower than on Windows (~50 ms). A PipeWire screencast path is planned to close this
-  gap — see issue #1.
-- **Window crops are region-crops on Wayland** — an overlapping window can bleed in. Wayland
-  cannot expose window geometry, so this is inherent to the platform, not a bug.
+- **Grab speed depends on the tier in use.** With a PipeWire ScreenCast stream a frame costs one
+  file read and a watch runs at its own cadence; without one, every frame goes through a one-shot
+  portal screenshot (~1.5–3.2 s), so a watch loop runs much slower than on Windows (~50 ms).
+
+  [Faster Wayland capture](#faster-wayland-capture-optional) is one `apt install` away.
+- **Window crops are region-crops on Wayland when no window stream is running** — an overlapping
+  window can bleed in, because the portal's Screenshot API cannot expose window geometry. A
+  ScreenCast stream returns the window's own pixels and has no such limit.
 - **First grab shows a one-time portal consent dialog** (persisted afterwards via the portal).
 - **Camera capture is untested on real Linux hardware** — reports welcome.
 
@@ -52,12 +55,38 @@ Source, issues and releases: **https://github.com/MaJorDan383/peripheral-vision*
   never refuse); from 0.21.2 on, the loader enforces it. Use **0.21.4+** if the vision model
   lives on OpenCode Zen/Go: those endpoints reject requests without session-affinity headers,
   and the host helper that builds them only exists from 0.21.4.
+- **Optional, Linux only:** `gstreamer1.0-pipewire`, `gstreamer1.0-tools` and a `python3` with
+  PyGObject (`python3-gi`) turn on the PipeWire ScreenCast tier — see
+  [Faster Wayland capture](#faster-wayland-capture-optional). Without them, Wayland capture
+  falls back to the one-shot portal screenshot and nothing else changes.
 - Python packages `opencv-python-headless` (`>=4.5,<6`), `Pillow` (`>=10.0,<13`) and `openai`
   (`>=1.0.0,<3`) — declared in `pyproject.toml` (`[project].dependencies`), the file Hermes reads
   for plugins. Hermes installs them when you install or enable the plugin, resolved together with
   Hermes's own dependency ranges (a combination that cannot resolve is refused up front), and
   re-applies them after `hermes update`. To install them yourself instead:
   `pip install "opencv-python-headless>=4.5,<6" "Pillow>=10.0,<13" "openai>=1.0.0,<3"`
+
+### Faster Wayland capture (optional)
+
+On Wayland a frame normally costs a one-shot portal screenshot and a full-screen PNG decode
+(~1.5–3.2 s). When the pieces below are present the plugin instead asks the portal for a
+**ScreenCast** stream and reads the compositor's own frames directly — a few milliseconds each,
+with no dialog after the first — and, unlike screenshots, it can return a *window's own* pixels
+rather than a crop of the region it happens to occupy:
+
+```bash
+# Debian/Ubuntu — the decode pipeline, and the interpreter the portal helper runs on
+sudo apt install gstreamer1.0-pipewire gstreamer1.0-tools python3-gi
+# Fedora: sudo dnf install pipewire-gstreamer gstreamer1-plugins-base python3-gobject
+# Arch:   sudo pacman -S gst-plugin-pipewire gstreamer python-gobject
+```
+
+Nothing else is needed and nothing has to be enabled: the tier is probed on first use, and every
+failure — an X11 session, a portal built without ScreenCast, a missing `pipewiresrc` element, no
+`python3` with PyGObject, a refused consent — leaves the screenshot tier exactly as it was.
+`GET /sources` reports the tier that is available, the watch status carries the `grab_method` that
+produced the current frame, and the pane's status line names the reason whenever a frame is not
+live (for example: a window being shown as a screen region because no window stream is running).
 
 ### Install from the Hermes CLI (recommended)
 

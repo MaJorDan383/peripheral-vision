@@ -63,13 +63,16 @@ session type can and cannot do.
 - **XWayland + X11 grabs**: XWayland's root window has no pixels and native Wayland windows
   are invisible to X11 clients — do not rely on it.
 
-## Tiered architecture (target design)
+## Tiered architecture
 
-Tiers 1 and 2 are what shipped, with one substitution: the Linux backends shell out to the
-platform CLIs (`xrandr`, `wmctrl`, `import`, `grim`) instead of linking python-xlib, because those
-CLIs are already present on the desktops that have them and cost no dependency. Tier 3 (the
-PipeWire ScreenCast fast path) is designed, not implemented — live Wayland grabs use the one-shot
-portal screenshot, which is the ~1.5-3.2 s cost the README calls out (tracking: issue #1).
+All three tiers shipped, with one substitution: the Linux backends shell out to the platform CLIs
+(`xrandr`, `wmctrl`, `import`, `grim`) instead of linking python-xlib, because those CLIs are
+already present on the desktops that have them and cost no dependency. Tier 3 is
+`dashboard/capture_pipewire.py`: it drives the portal's ScreenCast API over D-Bus and decodes the
+compositor's own stream with a `gst-launch-1.0 pipewiresrc fd= path=` pipeline, so a Wayland frame
+costs one file read instead of a full-screen screenshot round trip. It degrades silently — any
+missing piece (no `gstreamer1.0-pipewire`, no `python3-gi`, a portal built without ScreenCast)
+leaves the screenshot tier exactly as it was.
 
 A capability-tiered capture backend behind the existing seams (`_grab`, window enumeration,
 grab-state probes), selected once at import time by session type
@@ -78,11 +81,15 @@ grab-state probes), selected once at import time by session type
 1. **win tier** — today's code, untouched (zero regression on the platform in use).
 2. **x11 tier** — python-xlib: EWMH window list, XComposite per-window pixmap, XGetImage/XSHM
    region grabs; minimize via `_NET_WM_STATE_HIDDEN`/map_state. Full picker UX preserved.
-3. **wayland tier** — xdg-desktop-portal ScreenCast via D-Bus (jeepney/dbus-next) + PipeWire:
-   `pipewire-capture` (PyPI, prebuilt wheels, window selection + BGRA frames) or a GStreamer
-   `pipewiresrc` pipeline; ScreenCast restore tokens make consent one-time per source. The
-   picker's "Choose source" step becomes: enumerate monitors + request a window pick; snapshot
-   = latest stream frame; crop math unchanged (normalized rect).
+3. **wayland tier** — xdg-desktop-portal ScreenCast over D-Bus + PipeWire. Shipped as
+   `capture_pipewire.py`: a small helper process (`python3` with PyGObject, no extra pip
+   dependency) walks CreateSession → SelectSources → Start → OpenPipeWireRemote, hands the
+   portal-issued fd to a `gst-launch-1.0 pipewiresrc fd= path=` pipeline and drops JPEGs into a
+   private runtime dir; the newest complete file is the frame, and killing the pipeline is what
+   ends the portal session. `persist_mode` carries a pick into every later watch of that source,
+   so consent is one-time; monitors pick a monitor, windows ask the portal for a window pick.
+   The screenshot tier stays behind it: ScreenCast first, then the one-shot portal screenshot,
+   then grim.
 
 Shared on all tiers: pane JS (Electron both OSes), still/session machinery, crop overlay at
 full resolution, last-frame fallback, the settle/auto-upgrade logic (on Wayland it mostly

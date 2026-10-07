@@ -383,7 +383,7 @@ def _capture_reason() -> str:
 
 
 def _capture_state() -> dict:
-    """What the capture tiers are doing here, for the pane's HUD."""
+    """What the capture tiers are doing here — reported through ``/sources``."""
     state = {
         "platform": "wayland" if _is_wayland() else "x11",
         "method": getattr(_GRAB_STATE, "method", "") or "",

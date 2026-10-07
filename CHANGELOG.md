@@ -28,6 +28,15 @@ All notable changes to this plugin. Nothing before the first public release was 
 - **A pre-commit hook runs the same lint gate as CI.** `.pre-commit-config.yaml` pins the ruff
   version CI pins; `uvx pre-commit install` once per clone, then a commit that clears the hook
   clears the lint job. The rule families and their rationale stay in `pyproject.toml`.
+- **Wayland capture got a fast path: the portal's PipeWire ScreenCast.** `capture_pipewire.py`
+  drives CreateSession → SelectSources → Start → OpenPipeWireRemote and hands the portal-issued
+  fd to a `gst-launch-1.0 pipewiresrc fd= path=` pipeline, so a frame is one file read instead of
+  a full-screen screenshot round trip — and a *window* watch finally gets the window's own pixels
+  rather than a crop of the region it covers. Consent is one-time (`persist_mode`), a stream that
+  is already running is reused without a dialog, and every probe failure leaves the screenshot
+  tier untouched, so this is additive on Linux and inert everywhere else. Needs
+  `gstreamer1.0-pipewire`, `gstreamer1.0-tools` and `python3-gi`; see
+  [Faster Wayland capture](README.md#faster-wayland-capture-optional).
 
 ### Changed
 - **The pane's controls regrouped.** "check for changes" is now **Blink rate**; the
