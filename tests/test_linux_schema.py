@@ -759,3 +759,41 @@ def test_grab_method_reaches_plugin_api():
         assert api._grab_method() == "grim"
     finally:
         L._method("")
+
+
+def test_pipewire_helper_contract():
+    """Pin the helper's portal contract — it is the one part that cannot run here.
+
+    The embedded script only ever executes on a real Wayland session, so a typo in the
+    D-Bus sequence or the pipeline would not show up in this suite until someone ran it
+    on a desktop. Assert the shape instead: the four portal calls in order, the
+    ``persist_mode`` that makes consent one-time, and a pipeline that consumes the
+    portal-issued fd and writes files the parent can read.
+    """
+    import capture_pipewire as pw
+    s = pw._SCRIPT
+    for call in ("CreateSession", "SelectSources", "Start", "OpenPipeWireRemote"):
+        assert f'"{call}"' in s, f"helper never calls {call}"
+    assert s.index('"CreateSession"') < s.index('"SelectSources"') < s.index('"Start"'), \
+        "portal calls are out of order"
+    assert 'GLib.Variant("u", 2)' in s, "persist_mode 2 is what makes the pick one-time"
+    assert "pipewiresrc fd=%d path=%d" in s, "the portal fd must reach pipewiresrc"
+    assert "multifilesink" in s and "jpegenc" in s, "frames must land somewhere readable"
+    assert "DBUS_SESSION_BUS_ADDRESS" in s, "must join the session bus"
+
+
+def test_pipewire_helper_parses():
+    """The embedded helper must be valid Python (it is executed with `python3 -`)."""
+    import ast
+
+    import capture_pipewire as pw
+
+    ast.parse(pw._SCRIPT)
+
+
+def test_pipewire_elements_are_the_pipeline_it_builds():
+    """Every element probe() checks must be one the pipeline actually uses."""
+    import capture_pipewire as pw
+    pipeline = pw._SCRIPT.split('pipeline = (', 1)[1].split(')', 1)[0]
+    for element in pw._ELEMENTS:
+        assert element in pipeline or element in pw._SCRIPT, element
