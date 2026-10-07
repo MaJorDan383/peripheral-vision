@@ -7,9 +7,8 @@ session type can and cannot do.
 
 > **Linux is preview, not parity.** Verified tier: GNOME/Wayland only. X11 and KDE/wlroots
 > paths are code-complete and unit-tested but not yet run live; camera capture is untested on
-> real Linux hardware. The PipeWire ScreenCast fast path (below) is *designed but not
-> implemented* — live grabs use the slow one-shot portal screenshot (~1.5–3.2 s), which is why
-> the README labels Linux preview. Tracking: issue #1.
+> real Linux hardware. The PipeWire ScreenCast tier (below) is implemented and unit-tested;
+> live verification on a Wayland session is still pending. Tracking: issue #1.
 
 ## Verdict
 
