@@ -44,6 +44,11 @@ def collect() -> list[Path]:
             continue
         if any(part in EXCLUDE_DIRS for part in rel.parts):
             continue
+        # A setuptools artifact from an editable install. It is gitignored and regenerated
+        # locally, and its PKG-INFO would ship whatever version was current when it was
+        # built — a release zip claiming a version the plugin does not have.
+        if any(part.endswith(".egg-info") for part in rel.parts):
+            continue
         if rel.parts and rel.parts[0] in EXCLUDE_NAMES:
             continue
         if rel.name.startswith("."):
