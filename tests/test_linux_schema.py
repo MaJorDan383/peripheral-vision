@@ -730,3 +730,32 @@ def test_cleanup_stops_pipewire_sessions(monkeypatch):
     L.LinuxCapture().cleanup()
     with pw._LOCK:
         assert len(pw._SESSIONS) == 0
+
+
+def test_backend_reporting_reaches_plugin_api():
+    """What the Linux backend records must be what the watch status reads.
+
+    The pane's status line is fed by ``plugin_api._grab_waiting()``; the backend writes
+    ``_GRAB_STATE.waiting``. If those are two different per-thread objects the reason is
+    silently dropped, so the seam itself is asserted here.
+    """
+    import capture_linux as L
+    import plugin_api as api
+    assert L._GRAB_STATE is api._GRAB_STATE
+    L._waiting("shown as a screen region — another window may cover it")
+    try:
+        assert api._grab_waiting() == "shown as a screen region — another window may cover it"
+    finally:
+        L._waiting("")
+    assert api._grab_waiting() == ""
+
+
+def test_grab_method_reaches_plugin_api():
+    """The method a Linux grab used must reach the watch status the same way."""
+    import capture_linux as L
+    import plugin_api as api
+    L._method("grim")
+    try:
+        assert api._grab_method() == "grim"
+    finally:
+        L._method("")
