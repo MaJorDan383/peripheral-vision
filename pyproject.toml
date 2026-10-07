@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "peripheral-vision"
-version = "1.3.0"
+version = "1.4.0"
 description = "Peripheral vision for Hermes: watch a display, window, or camera - changed frames are described and injected into the turn"
 readme = "README.md"
 license = {text = "MIT"}

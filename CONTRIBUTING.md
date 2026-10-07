@@ -116,7 +116,8 @@ registering it in the dispatch there.
 ## Releasing (maintainers)
 
 1. Move `## [Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD`.
-2. Set the same version in `plugin.yaml` and `pyproject.toml`.
+2. Set the same version in `plugin.yaml`, `pyproject.toml` and
+   `dashboard/manifest.json` — all three carry it.
 3. Tag `vX.Y.Z` and publish the GitHub release from that changelog section.
 4. `python build_release.py` writes a clean `peripheral-vision-release.zip` next to the plugin
    directory (tests, caches and dot-directories are excluded).

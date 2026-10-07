@@ -3,7 +3,7 @@
 All notable changes to this plugin. Nothing before the first public release was published, so
 `1.0.0` covers the whole plugin as shipped.
 
-## [Unreleased]
+## [1.4.0] - 2026-10-07
 
 ### Security
 - **Screen content is gated on the pane's selection.** `/preview`, `/start`, `/snap/start`,
@@ -36,7 +36,9 @@ All notable changes to this plugin. Nothing before the first public release was 
   is already running is reused without a dialog, and every probe failure leaves the screenshot
   tier untouched, so this is additive on Linux and inert everywhere else. Needs
   `gstreamer1.0-pipewire`, `gstreamer1.0-tools` and `python3-gi`; see
-  [Faster Wayland capture](README.md#faster-wayland-capture-optional).
+  [Faster Wayland capture](README.md#faster-wayland-capture-optional). *Unit-tested only — the
+  portal handshake, the pipeline it builds and every fallback are pinned by tests, but no live
+  Wayland session was available to run it against hardware.*
 
 ### Changed
 - **The pane's controls regrouped.** "check for changes" is now **Blink rate**; the
@@ -60,6 +62,16 @@ All notable changes to this plugin. Nothing before the first public release was 
   waits out the restore animation and matches the capture to the window's live frame bounds,
   so a poll that lands mid-restore can never adopt a clipped band — and the frozen DWM frame
   sharpens into a live full-resolution capture, no Retake.
+- **Lint gate added.** `ruff` (`F`, `E9`, `I` only) now runs in CI and is documented in
+  [CONTRIBUTING.md](CONTRIBUTING.md); the test matrix also runs on Windows, not just Linux.
+- **Five unreferenced private helpers removed** from the capture backends (a PipeWire probe
+  along with four Windows window-geometry helpers). Verified unreferenced across the plugin,
+  the tests and the pane before removal; the suite's pass count was the same before and after
+  (132 passed, 1 skipped).
+- **Documentation set.** `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue forms, a
+  pull-request template and a README badge row, alongside corrections where the docs had drifted
+  from the code (the Windows capture primitives table, the install path, and the Linux
+  dependency list).
 
 ### Fixed
 - **Two undefined names in the snapshot seams.** `plugin_api._thumb_capture` called
@@ -67,25 +79,15 @@ All notable changes to this plugin. Nothing before the first public release was 
   neither name was bound in that module, so a minimized-window thumbnail grab on the live path
   would have raised `NameError`. Both are now imported under their `capture_*` names, so the
   seams resolve at runtime while the tests keep monkeypatching them.
-- **Stale capture-backend leftovers.** An unused PipeWire session/stream pair in the Linux
-  backend (the fast path was never implemented — `cleanup()` now says what it actually holds,
-  which is nothing), a no-op `SetWindowPos` and a dead DC binding in the PrintWindow grab, and
-  unused imports and locals across both backends.
-
-### Changed
-- **Lint gate added.** `ruff` (`F`, `E9`, `I` only) now runs in CI and is documented in
-  [CONTRIBUTING.md](CONTRIBUTING.md); the test matrix also runs on Windows, not just Linux.
-- **Five unreferenced private helpers removed** from the capture backends (a PipeWire probe
-  along with four Windows window-geometry helpers). Verified unreferenced across the plugin,
-  the tests and the pane before removal; the suite is unchanged at 132 passed, 1 skipped.
-- **Documentation set.** `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue forms, a
-  pull-request template and a README badge row, alongside corrections where the docs had drifted
-  from the code (the Windows capture primitives table, the install path, and the Linux
-  dependency list).
+- **Stale capture-backend leftovers.** A no-op `SetWindowPos` and a dead DC binding in the
+  PrintWindow grab, unused imports and locals across both backends, and a session/stream pair the
+  Linux backend declared but never used — the ScreenCast tier above owns that job now, with a
+  lifecycle `cleanup()` really does shut down.
 
 ### Removed
-- The declared `linux` extra (`pipewire-capture`), which no code imports. The PipeWire ScreenCast
-  fast path is still tracked in [#1](https://github.com/MaJorDan383/peripheral-vision/issues/1).
+- The declared `linux` extra (`pipewire-capture`), which no code imports. The capture path it
+  named ships in this plugin now (see **Added**), driving the portal and `gst-launch-1.0`
+  directly rather than through a Python dependency.
 
 ## [1.3.0] - 2026-09-23
 
