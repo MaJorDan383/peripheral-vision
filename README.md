@@ -84,9 +84,11 @@ sudo apt install gstreamer1.0-pipewire gstreamer1.0-tools python3-gi
 Nothing else is needed and nothing has to be enabled: the tier is probed on first use, and every
 failure — an X11 session, a portal built without ScreenCast, a missing `pipewiresrc` element, no
 `python3` with PyGObject, a refused consent — leaves the screenshot tier exactly as it was.
-`GET /sources` reports the tier that is available, the watch status carries the `grab_method` that
-produced the current frame, and the pane's status line names the reason whenever a frame is not
-live (for example: a window being shown as a screen region because no window stream is running).
+
+Nothing is silent, either: on Linux `GET /sources` gains a `capture` block naming the platform and
+saying whether a stream is available, the watch status carries the `grab_method` that produced the
+current frame, and the pane's status line names the reason whenever a frame is not live — for
+example a window being shown as a screen region because no window stream is running.
 
 ### Install from the Hermes CLI (recommended)
 

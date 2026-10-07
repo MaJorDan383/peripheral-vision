@@ -466,7 +466,7 @@ def test_xenv_resolves_mutter_xwayland_cookie(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# PipeWire ScreenCast tier (v1.5.0): portal session + pipewiresrc pipeline.
+# PipeWire ScreenCast tier (v1.4.0): portal session + pipewiresrc pipeline.
 # ---------------------------------------------------------------------------
 
 def test_pipewire_probe_rejects_non_wayland(monkeypatch):
@@ -797,3 +797,22 @@ def test_pipewire_elements_are_the_pipeline_it_builds():
     pipeline = pw._SCRIPT.split('pipeline = (', 1)[1].split(')', 1)[0]
     for element in pw._ELEMENTS:
         assert element in pipeline or element in pw._SCRIPT, element
+
+
+def test_sources_route_passes_the_capture_block_through(monkeypatch):
+    """`/sources` must hand the backend's `capture` block to the caller untouched.
+
+    The block is what tells a Linux user which tier is in play, so the route must not
+    drop or reshape it. (The Windows backend simply has no such block.)
+    """
+    import asyncio
+
+    import plugin_api as api
+
+    sentinel = {"platform": "wayland", "screencast": {"state": "available", "method": "pipewire"}}
+    monkeypatch.setattr(api, "capture_list_sources", lambda: {
+        "monitors": [], "windows": [], "cameras": [], "count": 0, "capture": sentinel,
+    })
+    body = asyncio.run(api.get_sources())
+    assert body["capture"] == sentinel
+    assert body["count"] == 0
