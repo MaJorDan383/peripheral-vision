@@ -3,6 +3,42 @@
 All notable changes to this plugin. Nothing before the first public release was published, so
 `1.0.0` covers the whole plugin as shipped.
 
+## [1.5.0] - 2026-10-07
+
+### Added
+- **macOS capture.** `dashboard/capture_macos.py` is a third backend behind the same seams:
+  displays and per-window pixels through CoreGraphics (`CGWindowListCopyWindowInfo`,
+  `CGDisplayCreateImage`, `CGWindowListCreateImage` — the window's *own* surface, so an
+  occluded window still comes back whole), cameras through AVFoundation, and a
+  `screencapture`/`system_profiler` tier for a host without pyobjc. `platforms` in
+  `plugin.yaml` now lists `macos`; `capture.py` routes `darwin` there instead of falling
+  back to the X11 paths.
+- **The Screen Recording grant is reported, not guessed.** Until the host process holds it,
+  macOS hands back black frames *with no error* and hides window titles. `GET /sources`
+  gains the same `capture` block Linux has — platform, tier, live grab state, and
+  `permission.screen_recording: granted|denied|unknown` with the System Settings route — the
+  pane's status line names the reason, and the system prompt is requested once, from a
+  capture attempt only, so enumerating sources can never pop a dialog.
+- **`pyobjc-framework-Quartz` is declared for macOS only** (`sys_platform == 'darwin'`), so
+  the dependency reaches a Mac and no other platform. A host that ends up without it still
+  captures displays and cameras, and `/sources` says why the window list is empty.
+- **65 tests** (`tests/test_macos_schema.py`) drive the backend from fakes shaped like real
+  Quartz returns, on every OS: the source schema, geometry, tier selection, the permission
+  states, the one-shot prompt, camera probing and abandonment, and the failure paths that
+  must degrade instead of raising.
+
+### Changed
+- `docs/macos-feasibility.md` keeps its assessment and gains its outcome; the README platform
+  table moves macOS from ❌ to 🧪 preview, and `docs/cross-platform-capture.md` carries the
+  macOS tier map.
+
+### Notes
+- **macOS is unit-tested only** — no CI runner and no host here can grant Screen Recording in
+  a GUI session, so "does a live window grab return pixels on a Mac" is unverified, the same
+  caveat the PipeWire tier carries. There is also no macOS peer for `DwmRegisterThumbnail`:
+  a minimized window has no live frame, and the plugin's last-frame cache serves it with the
+  reason attached.
+
 ## [1.4.0] - 2026-10-07
 
 ### Security

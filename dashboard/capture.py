@@ -4,6 +4,7 @@ Dispatches to the OS-specific backend selected once at import time:
 
     win32  → ``capture_windows``  (Win32/GDI + DWM thumbnails + OpenCV)
     linux  → ``capture_linux``    (xrandr/wmctrl/import/grim/V4L2)
+    darwin → ``capture_macos``    (CoreGraphics + screencapture fallback + AVFoundation)
 
 Public API (used by ``plugin_api.py``):
 
@@ -58,7 +59,9 @@ def _backend():
         import capture_windows as _be
     elif sys.platform.startswith("linux"):
         import capture_linux as _be
-    else:  # macOS falls back to Linux (X11) paths
+    elif sys.platform == "darwin":
+        import capture_macos as _be
+    else:  # an unknown POSIX: the X11 paths are the closest thing to a real answer
         import capture_linux as _be
     return _be
 

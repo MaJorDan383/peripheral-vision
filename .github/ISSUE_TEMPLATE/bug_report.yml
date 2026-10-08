@@ -12,7 +12,10 @@ body:
         - **Redact window titles** (and anything else on screen you would not want public) — they
           are the most common accidental leak in capture reports.
         - Check the [platform support table](https://github.com/MaJorDan383/peripheral-vision#platform-support):
-          Linux is preview, macOS is unsupported.
+          Windows is stable; Linux and macOS are preview.
+        - On macOS, say whether the app has the **Screen Recording** grant (System Settings →
+          Privacy & Security → Screen Recording) — without it every grab is black and window
+          titles are hidden, which is not a plugin bug.
 
   - type: dropdown
     id: platform
@@ -23,7 +26,7 @@ body:
         - Linux — GNOME/Wayland
         - Linux — X11
         - Linux — KDE/wlroots
-        - macOS (unsupported)
+        - macOS (preview — needs the Screen Recording grant)
         - Other
     validations:
       required: true
@@ -95,7 +98,8 @@ body:
       description: |
         Useful if you have it: the shell's stderr, and the relevant fields of
         `$HERMES_HOME/cache/peripheral-vision/status.json` (the `method` field says how the last
-        frame was grabbed — `printwindow`, `screen`, `thumbnail`, `camera`).
+        frame was grabbed — `printwindow`, `screen`, `thumbnail`, `camera` on Windows,
+        `coregraphics`, `screencapture`, `camera` on macOS).
       render: text
     validations:
       required: false

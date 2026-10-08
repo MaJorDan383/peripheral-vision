@@ -1,12 +1,9 @@
 # Cross-platform capture feasibility (Windows + Linux in one plugin)
 
-Status: implemented + live-verified, 2026-09-27. Capture dispatches at import time
-(`capture.py` → `capture_windows` / `capture_linux`); Linux grabs were verified on a live
-GNOME Wayland VM (Ubuntu 24.04). This doc records the ceiling we found and what each
-session type can and cannot do.
-
-macOS is **not** implemented: [docs/macos-feasibility.md](macos-feasibility.md) covers what a
-fourth backend would take, and the two places it cannot reach parity.
+Status: implemented, 2026-10-07. Capture dispatches at import time (`capture.py` →
+`capture_windows` / `capture_linux` / `capture_macos`). Linux grabs were verified on a live
+GNOME Wayland VM (Ubuntu 24.04); macOS capture is **unit-tested only** (see below). This doc
+records the ceiling we found and what each session type can and cannot do.
 
 > **Linux is preview, not parity.** Verified tier: GNOME/Wayland only. X11 and KDE/wlroots
 > paths are code-complete and unit-tested but not yet run live; camera capture is untested on
@@ -52,6 +49,26 @@ fourth backend would take, and the two places it cannot reach parity.
 | Minimized last frame | none — window is unmapped | stream pauses/ freezes; the plugin's existing last-frame cache covers it |
 | One-shot screenshot | XGetImage | portal Screenshot is interactive and cannot pick a window on GNOME — stills should ride the ScreenCast stream instead |
 | Camera | OpenCV VideoCapture (V4L2) | same |
+
+## macOS equivalents (`dashboard/capture_macos.py`)
+
+| Need | macOS |
+|------|-------|
+| Display list + geometry | `CGGetActiveDisplayList`, `CGDisplayBounds`, `CGDisplayPixelsWide` (Retina scale) — `system_profiler SPDisplaysDataType` as the no-pyobjc hint only |
+| Window list + titles | `CGWindowListCopyWindowInfo(OnScreenOnly\|ExcludeDesktopElements)`: `kCGWindowNumber/OwnerName/Name/Bounds/Layer`. **No permission → `kCGWindowName` is absent**, so rows fall back to the app name |
+| Window geometry / state | `kCGWindowBounds` (global, top-left origin) from the all-windows list; minimized = absent from the on-screen list and `kCGWindowIsOnscreen` false |
+| Capture occluded window | `CGWindowListCreateImage(CGRectNull, IncludingWindow, wid, BoundsIgnoreFraming\|BestResolution)` copies the window's *own* surface — the `PrintWindow` peer. Deprecated in macOS 14 in favour of ScreenCaptureKit's `SCScreenshotManager`; both are reachable through pyobjc |
+| Screen grab | `CGDisplayCreateImage(did)`; `screencapture -x -R x,y,w,h` (or `-D n`) as the CLI tier |
+| Minimized last frame | **No peer.** Nothing composites a minimized window, so the facade's own last-frame cache serves it — the same answer Wayland already needed |
+| Camera | `cv2.VideoCapture(i, cv2.CAP_AVFOUNDATION)`; names via `system_profiler SPCameraDataType -json` |
+| Permission | Screen Recording (TCC), per *host* process, granted in System Settings; `CGPreflightScreenCaptureAccess` reports it, `CGRequestScreenCaptureAccess` asks once from a capture attempt |
+
+Observable deltas on macOS: (a) a denied grant yields **black frames that report success**, so
+the plugin surfaces the permission state instead of the pixels; (b) no minimized-window live
+frame; (c) `pyobjc-framework-Quartz` is needed for windows and displays-own-pixels — without it
+the `screencapture` tier still answers for displays and cameras, and the window list is empty
+with the reason reported. Everything above the OS layer is unchanged. The assessment that led
+here is kept in [docs/macos-feasibility.md](macos-feasibility.md).
 
 ## Methods considered and rejected as "one library for both"
 

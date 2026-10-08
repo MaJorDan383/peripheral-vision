@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/MaJorDan383/peripheral-vision/actions/workflows/tests.yml/badge.svg)](https://github.com/MaJorDan383/peripheral-vision/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platforms: Windows stable, Linux preview](https://img.shields.io/badge/platforms-Windows%20stable%20%C2%B7%20Linux%20preview-9cf.svg)](#platform-support)
+[![Platforms: Windows stable, Linux preview, macOS preview](https://img.shields.io/badge/platforms-Windows%20stable%20%C2%B7%20Linux%20%2B%20macOS%20preview-9cf.svg)](#platform-support)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 [![Hermes 0.20.1+](https://img.shields.io/badge/Hermes-%E2%89%A50.20.1-8a63d2.svg)](plugin.yaml)
 
@@ -26,7 +26,7 @@ Peripheral Vision is a plugin for [Hermes](https://hermes-agent.nousresearch.com
 | **Windows 10/11** | ✅ **Stable** | DWM monitor + window capture, DirectShow cameras — the original, battle-tested path. |
 | **Linux — GNOME/Wayland** | 🧪 **Preview** | Live-verified on Ubuntu 24.04 GNOME (Wayland). Monitors, window list and per-window crops work via `xdg-desktop-portal`. Caveats below. |
 | **Linux — X11 / KDE / wlroots** | 🧪 **Preview (unverified)** | Code-complete and unit-tested (EWMH/`wmctrl`, XComposite, grim), but not yet run on a real session of those types. |
-| **macOS** | ❌ Unsupported | Not implemented; the installer refuses on `darwin`. [docs/macos-feasibility.md](docs/macos-feasibility.md) covers what a fourth backend would take. |
+| **macOS** | 🧪 **Preview (unit-tested only)** | Displays and per-window capture through CoreGraphics, cameras through AVFoundation, `screencapture` fallback tier. Needs the **Screen Recording** grant; not yet run on a real Mac — see caveats below. |
 
 **Linux preview caveats:**
 - **Grab speed depends on the tier in use.** With a PipeWire ScreenCast stream a frame costs one
@@ -40,13 +40,33 @@ Peripheral Vision is a plugin for [Hermes](https://hermes-agent.nousresearch.com
 - **First grab shows a one-time portal consent dialog** (persisted afterwards via the portal).
 - **Camera capture is untested on real Linux hardware** — reports welcome.
 
+**macOS preview caveats:**
+- **Screen Recording permission is required, and until it is granted a grab is black —
+  silently.** macOS returns black frames with no error and hides window titles unless the
+  *host* process holds the grant (System Settings → Privacy & Security → Screen Recording, then
+  restart the app). The plugin never passes that black frame off as a picture: the pane's status
+  line names the reason whenever a grab comes back without pixels, and `GET /sources` reports
+  `capture.permission.screen_recording` as `granted`, `denied` or `unknown`. The prompt is asked
+  for once, from the first capture attempt — never by listing sources.
+- **Window capture needs `pyobjc-framework-Quartz`**, declared with a `sys_platform == "darwin"`
+  marker so it installs on a Mac and nowhere else. A host without it still captures displays and
+  cameras through `screencapture`, and reports why the window list is empty.
+- **A minimized window has no live frame.** macOS has no equivalent of DWM's thumbnails, so the
+  plugin serves the last frame it captured for that window, with the reason attached; restoring
+  the window upgrades back to a live grab on its own.
+- **Frames are native pixels** — 2× on a Retina display. Each monitor row carries its `scale`.
+- **Not yet run on a real Mac.** Geometry, parsing, tier selection, permission states and every
+  fallback are pinned by tests that run on all three OSes, but no CI runner can grant Screen
+  Recording inside a GUI session. Reports welcome — the design record is
+  [docs/macos-feasibility.md](docs/macos-feasibility.md).
+
 ## Installation
 
 Source, issues and releases: **https://github.com/MaJorDan383/peripheral-vision**
 
 ### Requirements
-- **Windows 10/11** (Win32/DWM/DirectShow) or **Linux** (see [Platform support](#platform-support);
-  macOS unsupported). See [docs/cross-platform-capture.md](docs/cross-platform-capture.md) for the exact per-session
+- **Windows 10/11** (Win32/DWM/DirectShow), **Linux** or **macOS** (see
+  [Platform support](#platform-support)). See [docs/cross-platform-capture.md](docs/cross-platform-capture.md) for the exact per-session
   feature matrix.
 - Python 3.9+
 - Hermes **0.20.1 or newer** (declared as `requires_hermes` in `plugin.yaml`). 0.20.1 is the
@@ -85,10 +105,11 @@ Nothing else is needed and nothing has to be enabled: the tier is probed on firs
 failure — an X11 session, a portal built without ScreenCast, a missing `pipewiresrc` element, no
 `python3` with PyGObject, a refused consent — leaves the screenshot tier exactly as it was.
 
-Nothing is silent, either: on Linux `GET /sources` gains a `capture` block naming the platform and
-saying whether a stream is available, the watch status carries the `grab_method` that produced the
-current frame, and the pane's status line names the reason whenever a frame is not live — for
-example a window being shown as a screen region because no window stream is running.
+Nothing is silent, either: on Linux and macOS `GET /sources` gains a `capture` block naming the
+platform and saying whether a stream is available, the watch status carries the `grab_method` that
+produced the current frame, and the pane's status line names the reason whenever a frame is not live
+— for example a window being shown as a screen region because no window stream is running, or a
+macOS grab with no pixels because the Screen Recording grant is missing.
 
 If a stream never turns on, the `capture` block in `GET /sources` carries the reason — and the same
 answer comes from the probe, run on the machine that has the Wayland session. It needs nothing but

@@ -1,5 +1,5 @@
 name: peripheral-vision
-version: 1.4.0
+version: 1.5.0
 description: >-
   Peripheral vision for the conversation — choose a whole display, an individual
   application window (including one behind another app), or a camera/webcam,
@@ -8,7 +8,11 @@ description: >-
 license: "MIT"
 author: "MaJorDan"
 homepage: "https://github.com/MaJorDan383/peripheral-vision"
-platforms: ["windows", "linux"]
+platforms: ["windows", "linux", "macos"]
+# macOS window and display capture goes through CoreGraphics, which means the Screen
+# Recording grant: until the host process holds it, grabs come back black with no error
+# and window titles are hidden. The plugin reports that state instead of showing a black
+# frame as if it were a picture — see docs/cross-platform-capture.md.
 # Lowest host with everything the plugin calls: ctx.on_unload and the pre_llm_call hook both
 # exist from 0.20.1 (0.20.0 has no on_unload, so its unload path would leak the capture loop),
 # as do the pane API and the dashboard/plugin.js conventions. Hosts older than 0.21.2 ignore

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "peripheral-vision"
-version = "1.4.0"
+version = "1.5.0"
 description = "Peripheral vision for Hermes: watch a display, window, or camera - changed frames are described and injected into the turn"
 readme = "README.md"
 license = {text = "MIT"}
@@ -19,6 +19,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.9",
@@ -33,6 +34,12 @@ dependencies = [
     "opencv-python-headless>=4.5,<6",
     "Pillow>=10.0,<13",
     "openai>=1.0.0,<3",
+    # Window and display capture on macOS is CoreGraphics. The platform marker keeps it off
+    # every other install (pyobjc cannot build off macOS) and Hermes' resolver hands it to uv,
+    # which evaluates the marker for the target interpreter. A host that ends up without it is
+    # still served: the `screencapture` tier captures displays and cameras, and /sources says
+    # why the window list is empty.
+    "pyobjc-framework-Quartz>=9.0,<12; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -69,4 +76,4 @@ select = ["F", "E9", "I"]
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["capture", "capture_linux", "capture_windows", "shared_state", "plugin_api"]
+known-first-party = ["capture", "capture_linux", "capture_macos", "capture_windows", "shared_state", "plugin_api"]

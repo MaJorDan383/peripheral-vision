@@ -1,9 +1,12 @@
-# macOS capture feasibility (a fourth backend)
+# macOS capture feasibility (a third backend)
 
-Status: investigation only, 2026-10-07. Nothing here is implemented — `plugin.yaml` still
-declares `platforms: ["windows", "linux"]` and `capture.py` still points `darwin` at the Linux
-backend. This doc records what a macOS backend would cost, what it would buy, and the two
-places where macOS cannot match Windows.
+Status: **built**, 2026-10-07, shipped in **v1.5.0** as `dashboard/capture_macos.py` with the
+`darwin` branch in `capture.py`'s `_backend()` and `platforms: ["windows", "linux", "macos"]` in
+`plugin.yaml`. The doc below is kept as the design record: what it would cost, what it buys, and
+the two places where macOS cannot match Windows. What shipped differs from the plan in one
+respect — the `screencapture` tier is a *display and camera* fallback rather than a peer tier,
+because only CoreGraphics can enumerate windows. Verification level: unit-tested only (no GUI
+session can grant Screen Recording on a CI runner or on this host).
 
 ## Verdict
 
@@ -107,7 +110,13 @@ first-run/permission fallback — the CLI alone cannot enumerate windows or titl
   already handles, but it is where a naive port breaks first.
 - **Minimized windows** (above): the one feature that cannot be matched, only substituted.
 
-## What a macOS backend would change in this repo
+## What a macOS backend changes in this repo
+
+As built in v1.5.0: every row below landed except the CI leg, which needs a token with the
+`workflow` scope (the release token here has `gist, read:org, repo`) or a PR from the owner. The
+one design change from the plan: the `screencapture` tier covers displays and cameras only —
+window enumeration exists solely through CoreGraphics, so without pyobjc the window list is empty
+and says why.
 
 | File | Change |
 |------|--------|
@@ -124,7 +133,8 @@ first-run/permission fallback — the CLI alone cannot enumerate windows or titl
 ≈600–900 lines of backend plus ≈200 lines of tests and the CI leg for a first cut that covers
 displays, windows (including occluded grabs), cameras, geometry, and the permission probe.
 ScreenCaptureKit as the primary path, Retina policy, multi-display negative-origin handling,
-and shadow trimming are follow-on polish. It would ship as a new minor version.
+and shadow trimming are follow-on polish. It shipped as a new minor version (1.5.0): the backend
+came in at ~1,000 lines and the suite at ~780 lines / 65 tests.
 
 **The ceiling:** every pure part — geometry, coordinate mapping, source modelling, command
 construction, response parsing, and the stubbed Quartz seams — is unit-testable on any OS, and

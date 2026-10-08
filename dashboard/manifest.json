@@ -3,6 +3,6 @@
   "label": "Peripheral Vision",
   "description": "Screen awareness: watch a whole display, an individual app window (even one behind other apps), or a camera, describe changed frames with Hermes's current model, and feed them to the conversation.",
   "icon": "Eye",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "api": "plugin_api.py"
 }
