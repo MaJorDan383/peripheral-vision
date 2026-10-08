@@ -17,6 +17,7 @@ real Mac (Screen Recording is a GUI-session grant). That check needs a Mac.
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,37 @@ if str(DASHBOARD) not in sys.path:
     sys.path.insert(0, str(DASHBOARD))
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
+
+# capture_macos imports cv2 at module scope — a declared dependency, but CI installs only
+# pytest/fastapi/Pillow. Stub it when it is absent so this file stands alone instead of
+# depending on another test file's stub already being in sys.modules, and so the default
+# answer to a camera probe is "nothing attached" rather than a real webcam.
+class FakeCap:
+    """A capture device: ``opened=False`` is a device that is not there."""
+
+    def __init__(self, opened=True, width=1280, height=720):
+        self.opened, self.width, self.height = opened, width, height
+        self.released = False
+
+    def isOpened(self):
+        return self.opened
+
+    def get(self, prop):
+        return self.width if prop == mac.cv2.CAP_PROP_FRAME_WIDTH else self.height
+
+    def release(self):
+        self.released = True
+
+
+try:
+    import cv2 as _cv2  # noqa: F401
+except Exception:  # pragma: no cover - environment dependent
+    _cv2 = types.ModuleType("cv2")
+    _cv2.CAP_AVFOUNDATION = 0
+    _cv2.CAP_PROP_FRAME_WIDTH = 3
+    _cv2.CAP_PROP_FRAME_HEIGHT = 4
+    _cv2.VideoCapture = lambda index, backend: FakeCap(opened=False)
+    sys.modules["cv2"] = _cv2
 
 import capture_macos as mac  # noqa: E402  (after the path insert above)
 
@@ -151,6 +183,9 @@ def clean_slate(monkeypatch):
     monkeypatch.setattr(mac, "_CONVERT", {"error": ""})
     monkeypatch.setitem(mac._GRAB_STATE.__dict__, "method", "")
     monkeypatch.setitem(mac._GRAB_STATE.__dict__, "waiting", "")
+    # A probe answers "nothing attached" — no real webcam, and the same answer whether cv2
+    # is the real package or a stub. A test that wants a device patches VideoCapture itself.
+    monkeypatch.setattr(mac.cv2, "VideoCapture", lambda index, backend: FakeCap(opened=False))
     yield
 
 
@@ -660,20 +695,6 @@ def test_list_sources_counts_everything_it_returns(quartz, monkeypatch):
 
 
 # ── Cameras ───────────────────────────────────────────────────────────────
-
-class FakeCap:
-    def __init__(self, opened=True, width=1280, height=720):
-        self.opened, self.width, self.height = opened, width, height
-        self.released = False
-
-    def isOpened(self):
-        return self.opened
-
-    def get(self, prop):
-        return self.width if prop == mac.cv2.CAP_PROP_FRAME_WIDTH else self.height
-
-    def release(self):
-        self.released = True
 
 
 def test_camera_rows_match_the_schema_the_other_backends_emit(monkeypatch):
