@@ -154,6 +154,30 @@ VISION_NAME_HINTS = (
     "vision", "multimodal", "-vl", "/vl", "vl/", "llava", "pixtral",
 )
 _LAST_DESCRIBER = ""  # "provider/model" that produced the most recent description
+_LAST_ROUTE: Optional[dict[str, Any]] = None  # the route that actually served the last frame
+
+# A route that answers 400/401/403/404/405/422 — or refuses the connection outright — will not
+# work on the next tick either: the key, the permission or the model is wrong, or its endpoint is
+# down. Those move the ladder on instead of surfacing an error the user cannot act on. 429, 5xx and
+# timeouts stay transient and keep their existing retry-then-report path.
+_ROUTE_DEAD_STATUSES = frozenset({400, 401, 403, 404, 405, 422})
+_ROUTE_DEAD_ERRORS = frozenset(
+    {
+        "APIConnectionError",
+        "ConnectError",
+        "ConnectTimeout",
+        "URLError",
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "NewConnectionError",
+        "RemoteProtocolError",
+    }
+)
+# Long enough to stop paying for a dead route on every described frame, short enough that a fixed
+# pick recovers by itself without a restart.
+_ROUTE_COOLDOWN_S = 300.0
+_ROUTE_DEAD: dict[str, tuple[float, BaseException]] = {}  # route key -> (when parked, failure)
+_ROUTE_WARNED: set[str] = set()  # one log line per parked route, not one per tick
 _WATCH_SESSION: dict[str, str] = {"id": ""}  # live chat whose model describes frames
 
 
@@ -1049,12 +1073,18 @@ def _rejects_images(status: int, detail: str) -> bool:
 
 
 class _UpstreamError(RuntimeError):
-    """An HTTP error from the model endpoint, with status code and body preserved."""
+    """An HTTP error from the model endpoint, with status code and body preserved.
 
-    def __init__(self, status: int, detail: str):
-        super().__init__(f"HTTP {status}: {detail}")
+    ``label`` names the route it came from (``provider/model``) and leads the message, so the
+    text reads the way it always has while ``status`` stays a fact callers can act on — which is
+    how the describe ladder tells "this route cannot serve" from "this route blipped".
+    """
+
+    def __init__(self, status: int, detail: str, label: str = ""):
         self.status = status
         self.detail = detail
+        self.label = label
+        super().__init__(f"{f'{label} ' if label else ''}HTTP {status}: {detail}")
 
 
 def _affinity_headers(provider: str, base_url: str, session_id: str) -> dict[str, str]:
@@ -1192,7 +1222,7 @@ def _describe_with_model(png: bytes, route: dict[str, Any]) -> str:
                     route.get("model", ""),
                     f"the endpoint refused image input (HTTP {exc.status})",
                 ) from exc
-            last_exc = RuntimeError(f"{label} HTTP {exc.status}: {exc.detail}")
+            last_exc = _UpstreamError(exc.status, exc.detail, label)  # status stays classifiable
         except Exception as exc:  # 504/429/5xx and network blips are worth one more try
             last_exc = exc
         if attempt + 1 < max(1, VISION_ATTEMPTS):
@@ -1200,32 +1230,166 @@ def _describe_with_model(png: bytes, route: dict[str, Any]) -> str:
     raise last_exc if last_exc else RuntimeError(f"{label}: no response")
 
 
-def _describe(png: bytes) -> str:
-    """Describe a frame with the active model, falling back to the pinned one once.
+def _brief_error(exc: BaseException) -> str:
+    """One clause naming a failure, trimmed — never an upstream body verbatim.
 
-    Raises :class:`_NeedsVisionModel` when nothing available can accept images, so the
-    caller surfaces a prompt instead of quietly using someone else's endpoint.
+    A status is the actionable fact, so an HTTP failure is reported as just that rather than as a
+    developer's error string; a route that could not be reached says so in words, because the
+    exception class name means nothing to the person reading the pane.
     """
-    global _LAST_DESCRIBER
-    route = _route()
-    if not route.get("model"):
-        raise RuntimeError("no model configured — set one in Hermes (model.default)")
-    if route.get("supports_vision") is False:
-        raise _NeedsVisionModel(
-            route.get("provider", ""), route.get("model", ""), "the model is listed as text-only for image input"
+    if isinstance(exc, _UpstreamError):
+        return f"HTTP {exc.status}"
+    if type(exc).__name__ in _ROUTE_DEAD_ERRORS:
+        return "it could not be reached"
+    text = " ".join(str(exc).split())[:120]
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _route_key(route: dict[str, Any]) -> str:
+    return f"{route.get('provider')}/{route.get('model')}@{route.get('base_url') or ''}"
+
+
+def _route_is_dead(exc: BaseException) -> bool:
+    """True when the failure says the ROUTE cannot serve images, not that it blipped."""
+    if isinstance(exc, _NeedsVisionModel):
+        return True
+    if isinstance(exc, _UpstreamError):
+        return exc.status in _ROUTE_DEAD_STATUSES
+    return type(exc).__name__ in _ROUTE_DEAD_ERRORS
+
+
+def _route_died(route: dict[str, Any], exc: BaseException) -> None:
+    """Park a route that cannot serve, and say so once in the log."""
+    key = _route_key(route)
+    _ROUTE_DEAD[key] = (time.time(), exc)
+    if key not in _ROUTE_WARNED:
+        _ROUTE_WARNED.add(key)
+        _append_log(
+            {
+                "ts": time.time(),
+                "event": "describe_route_unavailable",
+                "route": key,
+                "source": route.get("source"),
+                "reason": _brief_error(exc)[:300],
+            }
         )
-    try:
-        text = _describe_with_model(png, route)
-        label = f"{route.get('provider')}/{route.get('model')}"
-    except _NeedsVisionModel:
-        # The active model refused the image at runtime: the pinned model gets one shot.
-        pin_route = None if route.get("source") == "pinned" else _pin_route()
-        if pin_route is None:
-            raise
-        text = _describe_with_model(png, pin_route)  # may refuse too -> prompt
-        label = f"{pin_route.get('provider')}/{pin_route.get('model')}"
-    _LAST_DESCRIBER = label
-    return text
+
+
+def _session_route(primary: dict[str, Any]) -> dict[str, Any]:
+    """The active session model as a describe route — the rung under an unusable aux pick."""
+    provider = str(primary.get("active_provider") or "")
+    model = str(primary.get("active_model") or "")
+    sid = str(primary.get("session_id") or "")
+    return {
+        "provider": provider,
+        "model": model,
+        "source": str(primary.get("active_source") or "session"),
+        "active_provider": provider,
+        "active_model": model,
+        "active_source": str(primary.get("active_source") or "session"),
+        "session_id": sid,
+        "active_supports_vision": primary.get("active_supports_vision"),
+        "supports_vision": primary.get("active_supports_vision"),
+        "base_url": _endpoint(_hermes_cfg(), provider, sid)[0],
+    }
+
+
+def _describe_ladder() -> list[dict[str, Any]]:
+    """The routes to try, best first: what the user configured, then what can actually see.
+
+    1. the resolved route — the ``auxiliary.vision`` pick, else the session/pinned model;
+    2. when that was an aux pick: the ACTIVE SESSION model. A pick whose key, permission or
+       endpoint is unavailable must not cost the user their descriptions while the model they are
+       already talking to can read a frame perfectly well — and when that model is text-only, it
+       still belongs on the ladder, because it is the thing the error has to name;
+    3. the model pinned in the pane (the existing fallback for a model that cannot see).
+    """
+    primary = _route()
+    routes = [primary]
+    if primary.get("source") == "auxiliary" and primary.get("active_model"):
+        routes.append(_session_route(primary))
+    if primary.get("source") != "pinned":
+        pinned = _pin_route()
+        if pinned:
+            routes.append(pinned)
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for route in routes:
+        key = _route_key(route)
+        if route.get("model") and key not in seen:
+            seen.add(key)
+            out.append(route)
+    return out
+
+
+def _vision_give_up(dead: list[tuple[dict[str, Any], BaseException]]) -> Exception:
+    """The error when no rung could see: name the model that blocks the user, and the failed pick.
+
+    A text-only model is the thing the user has to change, so it leads; the unavailable pick that
+    forced the question goes in the reason clause, where it tells them which setting to fix.
+    """
+    blind = [(route, exc) for route, exc in dead if isinstance(exc, _NeedsVisionModel)]
+    gone = [(route, exc) for route, exc in dead if route.get("source") == "auxiliary"]
+    if not blind:
+        return dead[-1][1] if dead else RuntimeError("no route could describe a frame")
+    route, exc = blind[0]
+    note = exc.raw
+    if gone:
+        pick, pick_exc = gone[0]
+        note = (
+            f"the configured auxiliary vision model {pick.get('provider')}/{pick.get('model')} "
+            f"is unavailable ({_brief_error(pick_exc)})"
+        )
+    return _NeedsVisionModel(str(route.get("provider") or ""), str(route.get("model") or ""), note)
+
+
+def _describe(png: bytes) -> str:
+    """Describe a frame, walking the ladder until a route can see.
+
+    An unusable route (refused key, permission or model — or an endpoint that is not answering)
+    falls through **silently**: it is parked for ``_ROUTE_COOLDOWN_S`` so later frames do not pay
+    for it again, and retried once the cooldown lapses, which is how a fixed pick recovers on its
+    own. Only when nothing on the ladder can accept images does this raise, via
+    :class:`_NeedsVisionModel`, naming what blocks the user and what to do about it.
+    """
+    global _LAST_DESCRIBER, _LAST_ROUTE
+    routes = _describe_ladder()
+    if not routes:
+        raise RuntimeError("no model configured — set one in Hermes (model.default)")
+
+    dead: list[tuple[dict[str, Any], BaseException]] = []
+    for index, route in enumerate(routes):
+        last = index == len(routes) - 1
+        if route.get("supports_vision") is False:
+            exc: Exception = _NeedsVisionModel(
+                str(route.get("provider") or ""),
+                str(route.get("model") or ""),
+                "the model is listed as text-only for image input",
+            )
+            dead.append((route, exc))
+            if last:
+                break
+            continue
+        parked = _ROUTE_DEAD.get(_route_key(route))
+        if not last and parked and (time.time() - parked[0]) < _ROUTE_COOLDOWN_S:
+            dead.append((route, parked[1]))  # parked moments ago: skip the wire call
+            continue
+        try:
+            text = _describe_with_model(png, route)
+        except Exception as exc:  # noqa: BLE001 - classified here, re-raised otherwise
+            if not _route_is_dead(exc):
+                raise  # 429/5xx/timeout: transient, keep today's retry-then-report behaviour
+            if not last:
+                _route_died(route, exc)  # park it and let the next rung serve this frame
+            dead.append((route, exc))
+            continue
+        if not text:
+            raise RuntimeError(f"{route.get('provider')}/{route.get('model')} returned no text")
+        _LAST_DESCRIBER = f"{route.get('provider')}/{route.get('model')}"
+        _LAST_ROUTE = route
+        return text
+
+    raise _vision_give_up(dead)
 
 def _consume_stop_request() -> bool:
     """True once per outstanding stop request, consuming it.
@@ -1318,6 +1482,10 @@ class _Engine:
     def status(self) -> dict[str, Any]:
         running = self._thread is not None and self._thread.is_alive()
         route = _route()
+        # The pane names the model that describes frames, so it has to name the one that really
+        # did: when the configured pick was unavailable the ladder served from another rung, and
+        # crediting the pick would tell the user a model is reading their screen when it is not.
+        vision_route = _LAST_ROUTE or route
         return {
             "running": running,
             "heartbeat_at": self.heartbeat_at,
@@ -1337,15 +1505,15 @@ class _Engine:
             "last_seconds": self.last_seconds,
             "describer": _LAST_DESCRIBER or None,
             "vision": {
-                "provider": route.get("provider"),
-                "model": route.get("model"),
-                "source": route.get("source"),
+                "provider": vision_route.get("provider"),
+                "model": vision_route.get("model"),
+                "source": vision_route.get("source"),
                 "active_provider": route.get("active_provider"),
                 "active_model": route.get("active_model"),
                 "active_source": route.get("active_source"),
                 "session_id": route.get("session_id"),
                 "active_supports_vision": route.get("active_supports_vision"),
-                "supports_vision": route.get("supports_vision"),
+                "supports_vision": vision_route.get("supports_vision"),
                 "fallback_model": route.get("fallback_model"),
                 "needs_vision_model": bool(self.needs_vision),
                 "detail": self.vision_error,

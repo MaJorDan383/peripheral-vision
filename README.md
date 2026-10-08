@@ -191,12 +191,14 @@ the Hermes backend (the desktop app inherits your user environment):
 | `PV_CAMERA_PROBE_TIMEOUT_S` | `5.0` | Timeout (seconds) for detecting one camera |
 | `PV_CAMERA_PROBE_WAVE` | `2` | Camera probe waves before giving up |
 
-Choosing the vision model is **not** an environment variable. Precedence: an explicit
-`auxiliary.vision` model in Hermes' own settings (Settings → Models) is the vision route —
-frames go there even when the session model can see; with no pick, frames go to the model the
-live session is running while it can see; a text-only session falls back to a model pinned from
-the desktop pane (`vision_model.json` in the plugin's state directory). An empty pin restores
-automatic routing.
+Choosing the vision model is **not** an environment variable. Frames go to whatever can read them,
+in this order: the `auxiliary.vision` model picked in Hermes' own settings (Settings → Models) —
+frames go there even when the session model can see; the model the live session is running, when
+the pick cannot serve the frame at all; a model pinned from the desktop pane (`vision_model.json`
+in the plugin's state directory). A route that answers `400/401/403/404/405/422` — or cannot be
+reached — is set aside for five minutes and tried no more, so a setting you fix recovers by itself.
+When nothing on the ladder can see, the pane names the model that blocks you, the setting at fault
+and how to resume. An empty pin restores automatic routing.
 
 ## Usage
 

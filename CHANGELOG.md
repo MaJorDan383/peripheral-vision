@@ -3,6 +3,20 @@
 All notable changes to this plugin. Nothing before the first public release was published, so
 `1.0.0` covers the whole plugin as shipped.
 
+## [Unreleased]
+
+### Fixed
+- **Descriptions survive an auxiliary vision model that cannot serve.** A pick whose key,
+  permission or endpoint refuses images (`400/401/403/404/405/422`, or a refused connection) is
+  set aside for five minutes and the frame is described by the active session model instead: the
+  pick is a preference, not a hard requirement, and a user who fixes it recovers without a
+  restart. `429`, `5xx` and timeouts stay transient and keep their retry-then-report path. The
+  pane's status now names the model that actually read the screen, not the one that was asked
+  first.
+- **The "nothing can see" error says what to do.** It names the model that blocks the user, the
+  auxiliary pick that forced the question (with its HTTP status — never an upstream body), and
+  the way to resume: switch this chat to a vision-capable model, or pin one for descriptions only.
+
 ## [1.5.0] - 2026-10-07
 
 ### Added
