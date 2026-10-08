@@ -24,6 +24,7 @@ EXCLUDE_DIRS = {
 EXCLUDE_NAMES = {
     Path(__file__).name,      # this build script
     "run_tests.py",
+    "conftest.py",
     "tests",
 }
 

@@ -11,48 +11,9 @@ from __future__ import annotations
 import json
 import os
 import sys
-import types
 from pathlib import Path
 
 import pytest
-
-# capture_linux imports cv2/numpy at module scope; stub them when absent so the
-# parser contract stays testable on hosts without a camera stack.
-for _name in ("cv2", "numpy"):
-    try:
-        __import__(_name)
-    except Exception:  # pragma: no cover - environment dependent
-        _mod = types.ModuleType(_name)
-        _mod.ndarray = object
-        _mod.VideoCapture = None
-        _mod.CAP_V4L2 = 0
-        _mod.CAP_PROP_FRAME_WIDTH = 3
-        _mod.CAP_PROP_FRAME_HEIGHT = 4
-        _mod.CAP_PROP_FPS = 5
-        sys.modules[_name] = _mod
-
-# pytest.approx inspects numpy itself (python_api calls np.isscalar); a numpy
-# stub missing the API pytest expects poisons every later test file that uses
-# approx, because sys.modules persists across the whole pytest process. Give
-# the stub the surface pytest actually touches.
-if "numpy" in sys.modules and not hasattr(sys.modules["numpy"], "isscalar"):
-    import numbers as _numbers
-
-    _np = sys.modules["numpy"]
-    _np.isscalar = lambda x: isinstance(x, _numbers.Number) or isinstance(x, (str, bytes, bool))
-    _np.number = _numbers.Number
-    _np.integer = int
-    _np.floating = float
-    _np.bool_ = bool
-    _np.ndarray = getattr(_np, "ndarray", object)
-    # approx() may route scalar-looking values through np.asarray; enough for floats.
-    def _asarray(x, dtype=None):
-        try:
-            return float(x)
-        except (TypeError, ValueError):
-            return x
-    _np.asarray = _asarray
-    _np.ndindex = lambda shape: iter([()])
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dashboard"))
 

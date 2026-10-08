@@ -30,7 +30,7 @@ def test_no_build_artifacts_ship():
 
 def test_no_dev_only_files_ship():
     names = _shipped()
-    for dev in ("tests/", "build_release.py", "run_tests.py", ".github/"):
+    for dev in ("tests/", "build_release.py", "run_tests.py", "conftest.py", ".github/"):
         assert not [n for n in names if n.startswith(dev) or f"/{dev}" in n], f"{dev} must not ship"
 
 

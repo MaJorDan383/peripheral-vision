@@ -17,7 +17,6 @@ real Mac (Screen Recording is a GUI-session grant). That check needs a Mac.
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -30,10 +29,8 @@ if str(DASHBOARD) not in sys.path:
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-# capture_macos imports cv2 at module scope — a declared dependency, but CI installs only
-# pytest/fastapi/Pillow. Stub it when it is absent so this file stands alone instead of
-# depending on another test file's stub already being in sys.modules, and so the default
-# answer to a camera probe is "nothing attached" rather than a real webcam.
+# conftest.py supplies cv2 for the whole rootdir — a stub when the package is absent, which
+# is what CI has. FakeCap is what a default probe answers with: no device attached.
 class FakeCap:
     """A capture device: ``opened=False`` is a device that is not there."""
 
@@ -50,16 +47,6 @@ class FakeCap:
     def release(self):
         self.released = True
 
-
-try:
-    import cv2 as _cv2  # noqa: F401
-except Exception:  # pragma: no cover - environment dependent
-    _cv2 = types.ModuleType("cv2")
-    _cv2.CAP_AVFOUNDATION = 0
-    _cv2.CAP_PROP_FRAME_WIDTH = 3
-    _cv2.CAP_PROP_FRAME_HEIGHT = 4
-    _cv2.VideoCapture = lambda index, backend: FakeCap(opened=False)
-    sys.modules["cv2"] = _cv2
 
 import capture_macos as mac  # noqa: E402  (after the path insert above)
 
