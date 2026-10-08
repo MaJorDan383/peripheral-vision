@@ -1631,6 +1631,13 @@ SNAP_PREVIEW_WIDTH = 1920
 # instead of holding its request open. The still-crop path never grabs, so it is unaffected.
 SNAP_GRAB_TIMEOUT_S = 25.0
 SNAP_DIR = STATE_DIR / "snaps"
+# Snapshots are the only thing this plugin writes that a user can pile up: one PNG per
+# crop, megabytes each at 4K, and a session of retakes writes one per retake. Retention
+# is deliberately blunt — the crop just written and the one before it, so the previous
+# crop is still on disk to drag back in, but no run can grow the folder without limit.
+# The pane stages a crop from the response's own bytes, never from this folder, so
+# pruning can never take away the image the user is looking at.
+SNAP_KEEP = 2
 
 _SNAP: dict[str, Any] = {
     "id": "",
@@ -1959,6 +1966,28 @@ def _crop_normalized(img: Any, rect: Any) -> Any:
     return img.crop((left, top, right, bottom))
 
 
+def _prune_snaps(keep: int = SNAP_KEEP) -> None:
+    """Leave only the newest ``keep`` snapshots in SNAP_DIR, and no half-written temp.
+
+    Runs on the snapshot thread right after a save. The name carries the timestamp (the
+    four hex chars only break a same-second tie), so a name sort is newest-last and
+    ``[:-keep]`` is exactly the superseded crops. A ``.tmp`` is a write that died between
+    its bytes and the replace — never a snapshot, always swept. Deleting is best-effort:
+    a stale file another process still holds open must not fail the save just asked for.
+    """
+    try:
+        saved = sorted(p for p in SNAP_DIR.glob("snap-*") if not p.name.endswith(".tmp"))
+        stale = list(SNAP_DIR.glob("snap-*.tmp"))
+    except OSError:
+        return
+    stale += saved[:-keep] if keep > 0 else saved
+    for path in stale:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def _snap_save(rect: Any) -> dict[str, Any]:
     """The session's capture, cropped by ``rect``, saved as PNG (thread caller).
 
@@ -1966,7 +1995,9 @@ def _snap_save(rect: Any) -> dict[str, Any]:
     window crops the session's stored still — the exact full-resolution image the overlay
     showed — so the saved crop can never point at pixels the user never saw. The base64
     twin rides back to the pane so it can stage the image into the chat input; the file on
-    disk is the same pixels, there for dragging in or keeping.
+    disk is the same pixels, there for dragging in or keeping. SNAP_DIR keeps only this
+    crop and the previous one (see ``_prune_snaps``), so the response's bytes — not a
+    returning visit to the folder — are what the pane hands to the chat.
     """
     source = _SNAP.get("source") or {}
     img = _SNAP.get("still") if _snap_kind(source) != "camera" else None
@@ -1988,6 +2019,7 @@ def _snap_save(rect: Any) -> dict[str, Any]:
     tmp = path.with_name(f"{name}.{os.getpid()}.tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
+    _prune_snaps()  # keep this crop and the one before it; nothing accumulates here
     result = {
         "ok": True,
         "name": name,

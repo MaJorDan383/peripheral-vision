@@ -232,7 +232,9 @@ first pops the matching source list — cameras for the camera button; displays 
 windows for the screen button — and picking a source opens a live view where you drag out the
 area to keep. Snapping crops at the source's full resolution, saves a PNG under the plugin's
 state directory (`snaps/`), and stages it into the chat **message input**, ready to send like
-any other image. No drag? The whole frame is taken. Switching back to a rhythm hides it
+any other image. No drag? The whole frame is taken. The folder holds the crop you just took and
+the one before it — nothing older, so a session of retakes can't fill the disk, and the image
+in the input rides the response's own bytes rather than the file. Switching back to a rhythm hides it
 again, and either pick is applied to a running watch without a restart. The crop view is fed at
 up to 1920 px wide while the crop itself is cut from the full-resolution capture, so the image
 that reaches the input stays sharp from a 4K display; and if a live capture fails — a minimized

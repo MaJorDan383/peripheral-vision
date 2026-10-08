@@ -180,6 +180,40 @@ def test_snap_crop_saves_the_selection(sandbox, monkeypatch) -> None:
     assert api._SNAP["id"] == session_id, "snapping keeps the session open for another crop"
 
 
+def _snap_once() -> dict:
+    started = asyncio.run(api.post_snap_start({"source_id": "monitor-1"}))
+    return asyncio.run(api.post_snap({"session_id": started["session_id"]}))
+
+
+def test_a_crop_prunes_everything_but_the_two_most_recent(sandbox, monkeypatch) -> None:
+    """A folder of retakes must not grow without limit — the last crop plus the previous."""
+    monkeypatch.setattr(api, "_source_from_id", lambda sid: _monitor(sid))
+    snaps = sandbox.tmp / "snaps"
+    first = _snap_once()
+    assert api.SNAP_KEEP == 2, "the promise this test pins is 'current and most recent'"
+    older = snaps / "snap-20200101-000000-zzzz.png"  # a crop from an earlier session
+    older.write_bytes(b"old")
+    second = _snap_once()
+    names = sorted(p.name for p in snaps.glob("snap-*.png"))
+    assert names == sorted([Path(first["path"]).name, Path(second["path"]).name])
+    assert not older.exists(), "the crop two saves back is the one that goes"
+    assert Path(second["path"]).exists(), "the crop just written is never its own casualty"
+
+
+def test_a_half_written_temp_is_swept_and_a_foreign_file_is_left_alone(sandbox, monkeypatch) -> None:
+    monkeypatch.setattr(api, "_source_from_id", lambda sid: _monitor(sid))
+    snaps = sandbox.tmp / "snaps"
+    snaps.mkdir(parents=True, exist_ok=True)  # _snap_save makes it; this test seeds it first
+    orphan = snaps / "snap-20200101-000000-zzzz.png.999.tmp"  # a write that died pre-replace
+    keep = snaps / "notes.txt"  # not ours; retention must not touch it
+    for path in (orphan, keep):
+        path.write_bytes(b"x")
+    result = _snap_once()
+    assert result["ok"] is True
+    assert not orphan.exists(), "no snapshot is a .tmp — always swept"
+    assert keep.read_bytes() == b"x", "pruning is scoped to the snapshots it wrote"
+
+
 def test_snap_sessions_expire_and_unknown_ids_are_refused(sandbox) -> None:
     assert asyncio.run(api.get_snap_frame("nope"))["ok"] is False
     assert asyncio.run(api.post_snap({"session_id": "nope"}))["ok"] is False
