@@ -5,6 +5,9 @@ Status: implemented + live-verified, 2026-09-27. Capture dispatches at import ti
 GNOME Wayland VM (Ubuntu 24.04). This doc records the ceiling we found and what each
 session type can and cannot do.
 
+macOS is **not** implemented: [docs/macos-feasibility.md](macos-feasibility.md) covers what a
+fourth backend would take, and the two places it cannot reach parity.
+
 > **Linux is preview, not parity.** Verified tier: GNOME/Wayland only. X11 and KDE/wlroots
 > paths are code-complete and unit-tested but not yet run live; camera capture is untested on
 > real Linux hardware. The PipeWire ScreenCast tier (below) is implemented and unit-tested;

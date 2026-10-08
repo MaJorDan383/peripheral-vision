@@ -26,7 +26,7 @@ Peripheral Vision is a plugin for [Hermes](https://hermes-agent.nousresearch.com
 | **Windows 10/11** | ✅ **Stable** | DWM monitor + window capture, DirectShow cameras — the original, battle-tested path. |
 | **Linux — GNOME/Wayland** | 🧪 **Preview** | Live-verified on Ubuntu 24.04 GNOME (Wayland). Monitors, window list and per-window crops work via `xdg-desktop-portal`. Caveats below. |
 | **Linux — X11 / KDE / wlroots** | 🧪 **Preview (unverified)** | Code-complete and unit-tested (EWMH/`wmctrl`, XComposite, grim), but not yet run on a real session of those types. |
-| **macOS** | ❌ Unsupported | Not implemented; the installer refuses on `darwin`. |
+| **macOS** | ❌ Unsupported | Not implemented; the installer refuses on `darwin`. [docs/macos-feasibility.md](docs/macos-feasibility.md) covers what a fourth backend would take. |
 
 **Linux preview caveats:**
 - **Grab speed depends on the tier in use.** With a PipeWire ScreenCast stream a frame costs one
