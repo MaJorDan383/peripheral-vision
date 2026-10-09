@@ -218,9 +218,8 @@ def abort_camera_probe() -> None:
 def _source_from_id(source_id: str) -> Optional[dict[str, Any]]:
     """The source a pick names, resolved without enumerating devices.
 
-    Only cameras and displays resolve here (index arithmetic and cheap ctypes); windows fall back to
-    the full listing. Enumerating on a pick is what made it slow enough for the desktop app's 30s
-    RPC timeout to fire.
+    Cameras and displays resolve by index arithmetic; windows fall back to the full listing.
+    Enumerating on a pick is what made it slow enough for the desktop app's 30s RPC timeout to fire.
     """
     match = re.fullmatch(r"camera-(\d+)", source_id)
     if match:
@@ -233,6 +232,10 @@ def _source_from_id(source_id: str) -> Optional[dict[str, Any]]:
     if match:
         index = int(match.group(1))
         return next((m for m in capture_list_monitors() if int(m.get("index", -1)) == index), None)
+    match = re.fullmatch(r"window-(\d+)", source_id)
+    if match:
+        hwnd = int(match.group(1))
+        return next((w for w in list_windows() if int(w.get("hwnd") or 0) == hwnd), None)
     return None
 
 
@@ -2592,27 +2595,41 @@ async def post_snap_stop(payload: dict[str, Any] = Body(default={})) -> dict[str
 
 
 @router.get("/preview")
-async def get_preview(width: int = 640, hwnd: int = 0) -> dict[str, Any]:
+async def get_preview(
+    width: int = 640, hwnd: int = 0, source_id: str = ""
+) -> dict[str, Any]:
     width = max(1, width)  # guard: 0 or negative → resize((0,0)) crash
-    """The pane's thumbnail: the frame being watched, or one program on request.
+    """The pane's thumbnail: the frame being watched, or one source on request.
 
-    With ``hwnd`` it previews a listed program instead of the watch — that is how the picker shows
-    what each window would actually contribute, including a minimized window's last frame (the very
-    DWM surface its taskbar preview shows). When that surface is gone, the program's last captured
-    frame answers instead, flagged ``last_frame``. The watch loop's status is untouched: grab state
-    is per thread.
+    With ``source_id`` (or the older ``hwnd``) it previews a listed source instead of the watch —
+    that is how the picker shows what each row would actually contribute, including a minimized
+    window's last frame (the very DWM surface its taskbar preview shows). When that surface is gone,
+    the source's last captured frame answers instead, flagged ``last_frame``. The watch loop's
+    status is untouched: grab state is per thread.
+
+    Picker previews (``source_id`` / ``hwnd``) bypass the selection gate — they are metadata, not
+    the watched frame, and the picker must show them before any source is chosen.
     """
-    refused = _selection_refusal()
-    if refused:
-        return refused
+    picker_preview = bool(source_id) or bool(hwnd)
+    if not picker_preview:
+        refused = _selection_refusal()
+        if refused:
+            return refused
     method = ENGINE.grab_method
     waiting = ENGINE.waiting
-    if hwnd:
+    if picker_preview:
+        # Resolve the source: source_id covers every kind; hwnd is the older window-only form.
+        source = None
+        if source_id:
+            source = _source_from_id(source_id)
+        if source is None and hwnd:
+            source = next(
+                (w for w in list_windows() if int(w.get("hwnd") or 0) == int(hwnd)), None
+            )
+        if not source:
+            return {"ok": False, "error": "that source is no longer available"}
 
         def _capture() -> tuple[Optional[bytes], int, int, str, str, str, bool]:
-            source = next((w for w in list_windows() if int(w.get("hwnd") or 0) == int(hwnd)), None)
-            if not source:
-                return None, 0, 0, "", "", "that program is no longer open", False
             # A minimized window previews as its DWM last frame (the surface taskbar previews show);
             # when even that is gone, the source's last captured frame answers instead.
             last = False

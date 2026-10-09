@@ -74,16 +74,11 @@ const INTERVALS = [
   { value: '0', label: 'manual' }
 ]
 
-// The three kinds of vision this plugin can run - one section of the source picker
-// each. The mode picker next to the source button pins which kind the NEXT pick
-// comes from, and mirrors whatever is being watched while a watch is up.
-const VISION_MODES = [
-  { value: 'displays', label: 'Displays' },
-  { value: 'windows', label: 'Windows' },
-  { value: 'cameras', label: 'Cameras' }
-]
-// A backend source kind (or, for older backends, an id prefix) -> a vision mode.
-const KIND_MODE = { monitor: 'displays', window: 'windows', camera: 'cameras' }
+// Every selectable source, listed together: displays, application windows and
+// cameras under one flat picker. The backend sends all three kinds at once, so
+// there is nothing to filter — the eye scrolls past nothing, and the pick is
+// one decision instead of two.
+const KIND_LABEL = { monitor: 'Display', window: 'Window', camera: 'Camera' }
 
 // When a fresh reading rides a turn — the same four modes the agent half knows, ordered
 // everyday-first. The labels are the user's words; the tooltip carries the full sentence.
@@ -181,20 +176,47 @@ function SourceRow({ source, selected, onSelect, preview }) {
   })
 }
 
-// Windows come with a live thumbnail of their own: what the watch would actually see right now —
-// including a minimized window's last frame.
-function WindowRow({ source, selected, onSelect, ctx, enabled }) {
+// A picker row with a live thumbnail: the backend serves /preview?source_id=… for any listed
+// source, so every row shows what the watch would actually see — a window's live frame (a
+// minimized one's last frame), a display's current contents, a camera's feed. A quiet camera is
+// never opened for a thumbnail: opening a virtual camera has side effects nobody asked for
+// (see capture_windows._camera_is_quiet).
+function PreviewRow({ source, selected, onSelect, ctx }) {
+  const isQuietCamera = source.kind === 'camera' && source.quiet
   const preview = useQuery({
-    queryKey: [ID, 'preview', source.hwnd || source.id],
-    queryFn: () => ctx.rest(`/preview?hwnd=${source.hwnd || 0}&width=160`),
+    queryKey: [ID, 'preview', source.id],
+    queryFn: () => ctx.rest(`/preview?source_id=${encodeURIComponent(source.id)}&width=160`),
     staleTime: 20000,
     refetchInterval: false,
-    // Gate closed → never fetch, and SourceRow gets no preview object at all: the row
-    // shows its title/detail only, and no cached frame from an earlier pick can render
-    // while no source is selected.
-    enabled: Boolean(enabled)
+    enabled: Boolean(source.id) && !isQuietCamera
   })
-  return jsx(SourceRow, { source, selected, onSelect, preview: enabled ? preview : undefined })
+  return jsx(SourceRow, { source, selected, onSelect, preview: isQuietCamera ? undefined : preview })
+}
+
+// One kind of source inside the flat picker list: a small header, its rows, and an
+// optional empty-state / footnote.
+function SourceSection({ title, sources, chosen, onSelect, ctx, empty, foot }) {
+  const list = sources || []
+  return jsxs('div', {
+    className: 'flex flex-col gap-1.5',
+    children: [
+      jsx('div', {
+        className: 'text-[11px] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)',
+        children: title
+      }),
+      list.map(source =>
+        jsx(
+          PreviewRow,
+          { source, selected: chosen && chosen.id === source.id, onSelect, ctx },
+          source.id
+        )
+      ),
+      empty
+        ? jsx('div', { className: 'flex items-center gap-2 text-xs text-(--ui-text-quaternary)', children: empty })
+        : null,
+      foot || null
+    ]
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -341,9 +363,6 @@ function PeripheralVisionPane({ ctx }) {
   const [chosen, setChosen] = useState(null)
   // The Blink-rate pick: optimistic while its POST is in flight; '0' is manual snapshots.
   const [intervalPick, setIntervalPick] = useState('')
-  // '' = follow whatever is being watched (Displays while idle); a pick pins the
-  // scope for the NEXT source choice, and starting a watch re-syncs it (see start()).
-  const [mode, setMode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [pinChoice, setPinChoice] = useState('')
@@ -412,19 +431,6 @@ function PeripheralVisionPane({ ctx }) {
   })
   const data = status.data || {}
   const running = Boolean(data.running)
-  // Which kind of vision is being watched right now, and which kind the picker
-  // will list next. status.source_kind is the authority while a watch is up; the
-  // source id prefix (monitor- / window- / camera-) covers older backends.
-  const watchedId = String((data.source && data.source.id) || '')
-  const watchedMode = running
-    ? KIND_MODE[data.source_kind || (data.source && data.source.kind)] ||
-      (watchedId.indexOf('camera') === 0
-        ? 'cameras'
-        : watchedId.indexOf('window') === 0
-          ? 'windows'
-          : 'displays')
-    : ''
-  const activeMode = mode || watchedMode || 'displays'
   // When fresh readings ride turns. Absent on a backend that predates POST /inject_mode —
   // the row below then does not render (nothing to pick against, no dead control).
   const injectState = data.inject_mode || null
@@ -504,7 +510,6 @@ function PeripheralVisionPane({ ctx }) {
         setError(result.error || 'could not start')
       } else {
         setPickerOpen(false)
-        setMode('') // re-sync the picker to the watch that just started
         host.notify({ kind: 'info', message: `Peripheral Vision → ${chosen.label}` })
       }
     } catch (err) {
@@ -763,28 +768,6 @@ function PeripheralVisionPane({ ctx }) {
             onClick: openPicker,
             children: running ? 'Change source…' : 'Choose source…'
           }),
-          jsx(Tip, {
-            label: 'Which kind of vision to pick from — the source list follows it',
-            children: jsx(Select, {
-              value: activeMode,
-              onValueChange: value => {
-                haptic('tap')
-                setMode(value)
-              },
-              children: jsxs(SelectTrigger, {
-                className: 'h-6 w-28 text-xs',
-                'aria-label': 'vision mode',
-                children: [
-                  jsx(SelectValue, {}),
-                  jsx(SelectContent, {
-                    children: VISION_MODES.map(option =>
-                      jsx(SelectItem, { value: option.value, children: option.label }, option.value)
-                    )
-                  })
-                ]
-              })
-            })
-          }),
           running
             ? jsx(Button, { size: 'sm', variant: 'ghost', disabled: busy, onClick: stop, children: 'Stop' })
             : null,
@@ -794,7 +777,7 @@ function PeripheralVisionPane({ ctx }) {
 
       jsx('div', {
         className: 'text-xs text-(--ui-text-quaternary)',
-        children: 'Nothing is captured until you pick a source in the picker — the mode picker decides which kind it lists.'
+        children: 'Nothing is captured until you pick a source in the picker — every display, window and camera is listed together.'
       }),
 
       injectState
@@ -1099,72 +1082,35 @@ function PeripheralVisionPane({ ctx }) {
                         children: [jsx(GlyphSpinner, {}), jsx('span', { children: 'asking the backend…' })]
                       })
                     : null,
-                  // One section at a time — the mode picker beside the source button
-                  // decides which, so the list never makes the eye scroll past the
-                  // kinds it is not choosing from.
-                  activeMode === 'displays'
-                    ? jsx('div', {
-                        className: 'text-[11px] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)',
-                        children: 'Displays'
-                      })
-                    : null,
-                  activeMode === 'displays'
-                    ? (sources.data && sources.data.monitors ? sources.data.monitors : []).map(
-                        source =>
-                          jsx(
-                            SourceRow,
-                            { source, selected: chosen && chosen.id === source.id, onSelect: choose },
-                            source.id
-                          )
-                      )
-                    : null,
-                  activeMode === 'windows'
-                    ? jsx('div', {
-                        className: 'text-[11px] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)',
-                        children: 'Application windows'
-                      })
-                    : null,
-                  activeMode === 'windows'
-                    ? (sources.data && sources.data.windows && sources.data.windows.length
-                        ? sources.data.windows
-                        : []
-                      ).map(
-                        source =>
-                          jsx(
-                            WindowRow,
-                            { source, selected: chosen && chosen.id === source.id, onSelect: choose, ctx, enabled: gateOpen },
-                            source.id
-                          )
-                      )
-                    : null,
-                  activeMode === 'windows' &&
-                  sources.data && sources.data.windows && sources.data.windows.length === 0
-                    ? jsx('div', {
-                        className: 'text-xs text-(--ui-text-quaternary)',
-                        children: 'No application windows were found.'
-                      })
-                    : null,
-                  activeMode === 'cameras'
-                    ? jsx('div', {
-                        className: 'text-[11px] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)',
-                        children: 'Cameras'
-                      })
-                    : null,
-                  activeMode === 'cameras'
-                    ? (sources.data && sources.data.cameras ? sources.data.cameras : []).map(
-                        source =>
-                          jsx(
-                            SourceRow,
-                            { source, selected: chosen && chosen.id === source.id, onSelect: choose },
-                            source.id
-                          )
-                      )
-                    : null,
-                  activeMode === 'cameras' &&
-                  sources.data && sources.data.cameras && sources.data.cameras.length === 0
-                    ? jsxs('div', {
-                        className: 'flex items-center gap-2 text-xs text-(--ui-text-quaternary)',
-                        children: [
+                  // One flat list: every kind the backend listed, each with its own
+                  // rows and live thumbnail. No kind picker — the eye sees every
+                  // choice at once and the pick is one decision.
+                  jsx(SourceSection, {
+                    title: 'Displays',
+                    sources: sources.data && sources.data.monitors,
+                    chosen,
+                    onSelect: choose,
+                    ctx
+                  }),
+                  jsx(SourceSection, {
+                    title: 'Application windows',
+                    sources: sources.data && sources.data.windows,
+                    chosen,
+                    onSelect: choose,
+                    ctx,
+                    empty:
+                      sources.data && sources.data.windows && sources.data.windows.length === 0
+                        ? 'No application windows were found.'
+                        : null
+                  }),
+                  jsx(SourceSection, {
+                    title: 'Cameras',
+                    sources: sources.data && sources.data.cameras,
+                    chosen,
+                    onSelect: choose,
+                    ctx,
+                    empty: sources.data
+                      ? [
                           sources.data.cameras_probing ? jsx(GlyphSpinner, {}) : null,
                           jsx('span', {
                             children: sources.data.cameras_probing
@@ -1172,14 +1118,13 @@ function PeripheralVisionPane({ ctx }) {
                               : 'No camera was detected.'
                           })
                         ]
-                      })
-                    : null,
-                  activeMode === 'cameras'
-                    ? jsx('div', {
-                        className: 'text-xs text-(--ui-text-quaternary)',
-                        children: 'A camera frame is described and sent like any other capture — the camera LED stays on while it is watched, and turns off when watching stops.'
-                      })
-                    : null
+                      : null,
+                    foot: jsx('span', {
+                      className: 'text-xs text-(--ui-text-quaternary)',
+                      children:
+                        'A camera frame is described and sent like any other capture — the camera LED stays on while it is watched, and turns off when watching stops.'
+                    })
+                  })
                     ]
                   }),
               jsx(DialogFooter, {

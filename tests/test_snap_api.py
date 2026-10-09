@@ -550,6 +550,47 @@ def test_preview_without_a_last_frame_reports_the_reason(sandbox, monkeypatch) -
     assert got["ok"] is False and "no frame" in got["error"]
 
 
+# ── picker previews via source_id ───────────────────────────────────────────
+
+
+def test_preview_by_source_id_bypasses_the_selection_gate(sandbox, monkeypatch) -> None:
+    """A picker preview is metadata, not the watched frame: it must work with the gate closed."""
+    asyncio.run(api.post_select({"source_id": ""}))  # close the gate
+    src = _window_source("window-777")
+    monkeypatch.setattr(api, "list_windows", lambda: [src])
+    got = asyncio.run(api.get_preview(width=64, source_id="window-777"))
+    assert got["ok"] is True and got["data_url"].startswith("data:image/jpeg;base64,")
+
+
+def test_preview_by_source_id_resolves_a_monitor(sandbox, monkeypatch) -> None:
+    mon = _monitor("monitor-0")
+    monkeypatch.setattr(api, "list_monitors", lambda: [mon])
+    got = asyncio.run(api.get_preview(width=64, source_id="monitor-0"))
+    assert got["ok"] is True and got["method"] == "screen"
+
+
+def test_preview_by_source_id_resolves_a_camera(sandbox, monkeypatch) -> None:
+    cam = _camera(2)
+    monkeypatch.setattr(api, "capture_camera_source", lambda index: cam)
+    got = asyncio.run(api.get_preview(width=64, source_id="camera-2"))
+    assert got["ok"] is True and got["data_url"].startswith("data:image/jpeg;base64,")
+
+
+def test_preview_by_source_id_reports_a_missing_source(sandbox, monkeypatch) -> None:
+    monkeypatch.setattr(api, "list_windows", lambda: [])
+    monkeypatch.setattr(api, "list_monitors", lambda: [])
+    monkeypatch.setattr(api, "capture_camera_source", lambda index: None)
+    got = asyncio.run(api.get_preview(width=64, source_id="window-999"))
+    assert got["ok"] is False and "no longer available" in got["error"]
+
+
+def test_preview_without_source_id_still_requires_the_gate(sandbox, monkeypatch) -> None:
+    """The watched-frame preview (no source_id) stays gated: no selection, no frame."""
+    asyncio.run(api.post_select({"source_id": ""}))
+    got = asyncio.run(api.get_preview(width=64))
+    assert got["ok"] is False and got.get("selection_required") is True
+
+
 # ── the minimized → restored upgrade ────────────────────────────────────────
 
 
