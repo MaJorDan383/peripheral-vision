@@ -13,6 +13,14 @@ All notable changes to this plugin. Nothing before the first public release was 
   eyes, and a 5 s blink rate checks a screen 12 times a minute instead of 30.
 
 ### Fixed
+- **Polling cameras no longer pops Phone Link's window.** Listing devices is free — ffmpeg
+  prints every camera name without touching a stream — but *opening* one is not: opening
+  `J's S23 Ultra (Windows Virtual Camera)` starts `CrossDeviceStreamingHost.exe` and puts the
+  phone's stream window on screen, so every probe wave popped it and closed it again moments
+  later. A probe now opens hardware cameras only. A virtual camera keeps its row (name from the
+  free listing, size from the remembered mode) and is opened only when it is actually picked.
+  A device that cannot be classified from its name is still probed — a camera is never hidden
+  just because it was not recognised. `PV_CAMERA_PROBE_ALL=1` restores probing everything.
 - **Descriptions survive an auxiliary vision model that cannot serve.** A pick whose key,
   permission or endpoint refuses images (`400/401/403/404/405/422`, or a refused connection) is
   set aside for five minutes and the frame is described by the active session model instead: the

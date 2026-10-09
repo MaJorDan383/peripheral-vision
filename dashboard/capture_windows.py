@@ -164,7 +164,18 @@ _CAMERA_MODES_LOADED = False
 _MODES_LOCK = threading.Lock()
 
 _CAMERA_NAMES: Optional[list[str]] = None
+_CAMERA_DEVICES: Optional[list[dict[str, str]]] = None
 _NAMES_LOCK = threading.Lock()
+
+# A probe must not OPEN a software/virtual camera: doing so has side effects nobody asked for.
+# Measured on this host — opening index 1, Phone Link's "J's S23 Ultra (Windows Virtual
+# Camera)", starts the phone's stream and pops the `CrossDeviceStreamingHost.exe` window;
+# releasing the device closes it again. Every picker refresh therefore popped the phone's
+# window. Hardware (a PnP moniker) is probed as before; a "quiet" device keeps its row — name
+# from the free ffmpeg enumeration, size from the remembered mode — and is opened only when it
+# is actually picked. `PV_CAMERA_PROBE_ALL=1` restores probing everything.
+CAMERA_PROBE_ALL = bool(os.environ.get("PV_CAMERA_PROBE_ALL"))
+_CAMERA_VIRTUAL_HINTS = ("virtual camera", "phone link", "cross device")
 
 
 def _camera_mode(index: int) -> Optional[tuple[int, int]]:
@@ -263,15 +274,21 @@ except Exception:
     pass
 
 
-def _camera_device_names() -> list[str]:
-    """DirectShow camera names, in enumeration order (matches cv2's index order)."""
-    global _CAMERA_NAMES
-    if _CAMERA_NAMES is not None:
-        return _CAMERA_NAMES
+def _camera_devices() -> list[dict[str, str]]:
+    """DirectShow video devices in enumeration order (matches cv2's index order).
+
+    Each entry is ``{"name": ..., "moniker": ...}``. The moniker is what separates real hardware
+    (a PnP ``usb`` moniker) from a software/virtual camera (an ``sw``/``vcamdevapi`` moniker) — see
+    :func:`_camera_is_quiet`. Listing costs nothing: ffmpeg enumerates device names without
+    opening a stream.
+    """
+    global _CAMERA_DEVICES, _CAMERA_NAMES
+    if _CAMERA_DEVICES is not None:
+        return _CAMERA_DEVICES
     with _NAMES_LOCK:
-        if _CAMERA_NAMES is not None:
-            return _CAMERA_NAMES
-        names: list[str] = []
+        if _CAMERA_DEVICES is not None:
+            return _CAMERA_DEVICES
+        devices: list[dict[str, str]] = []
         try:
             import shutil
             import subprocess
@@ -283,10 +300,72 @@ def _camera_device_names() -> list[str]:
                 )
                 text = (proc.stderr or "") + (proc.stdout or "")
                 names = re.findall(r'"([^"]+)"\s*\(video\)', text)
+                monikers = re.findall(r'Alternative name\s*"([^"]*)"', text)
+                if len(monikers) != len(names):
+                    monikers = [""] * len(names)  # pairing untrustworthy — the names still stand
+                devices = [{"name": n, "moniker": m} for n, m in zip(names, monikers)]
         except Exception:
-            names = []
-        _CAMERA_NAMES = names
-        return names
+            devices = []
+        _CAMERA_DEVICES = devices
+        _CAMERA_NAMES = [device["name"] for device in devices]
+        return devices
+
+
+def _camera_device_names() -> list[str]:
+    """DirectShow camera names, in enumeration order (matches cv2's index order)."""
+    return [device["name"] for device in _camera_devices()]
+
+
+def _camera_is_quiet(index: int) -> bool:
+    """True when a probe must not open this device.
+
+    Nothing is known about an index past the enumeration, so it is probed (the old behaviour);
+    a device with a PnP moniker is real hardware and probing it is free of side effects; every
+    other moniker is a software/virtual camera, which is left alone until it is picked. With no
+    moniker at all (an ffmpeg that did not print one) the name is the only signal.
+    """
+    if CAMERA_PROBE_ALL:
+        return False
+    devices = _camera_devices()
+    if index >= len(devices):
+        return False
+    moniker = (devices[index].get("moniker") or "").strip().lower()
+    name = (devices[index].get("name") or "").lower()
+    if moniker.startswith("@device_pnp_"):
+        return False
+    if not moniker:
+        return any(hint in name for hint in _CAMERA_VIRTUAL_HINTS)
+    return True
+
+
+def _quiet_camera_entry(index: int, previous: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """The picker row for a device a probe must not open.
+
+    Named from the free enumeration, sized from the mode this camera settled on last time, and
+    badged so the row explains itself. ``readable`` is only ever carried forward when it was
+    True — a device that answered once is not re-probed, so claiming otherwise would be a lie.
+    """
+    devices = _camera_devices()
+    name = devices[index]["name"] if index < len(devices) else ""
+    entry: dict[str, Any] = {
+        "id": f"camera-{index}",
+        "kind": "camera",
+        "index": index,
+        "label": name or f"Camera {index}",
+        "name": name,
+        "default": index == 0,
+        "badge": "virtual",
+        "quiet": True,
+    }
+    mode = _camera_mode(index)
+    if mode:
+        entry["width"], entry["height"] = mode
+    if previous:
+        if previous.get("readable"):
+            entry["readable"] = True
+        if not mode and previous.get("width") and previous.get("height"):
+            entry["width"], entry["height"] = previous["width"], previous["height"]
+    return entry
 
 
 def _probe_one_camera(
@@ -355,10 +434,23 @@ def _probe_cameras(deadline_s: float) -> None:
         out: dict[int, dict[str, Any]] = {}
         lock = threading.Lock()
         indices = list(range(CAMERA_MAX_INDEX))
-        for start in range(0, len(indices), CAMERA_PROBE_WAVE):
+        previous = {
+            int(device.get("index", -1)): device
+            for device in _CAMERA_CACHE.get("devices") or []
+            if isinstance(device, dict)
+        }
+        # A quiet device is never opened — its row is answered from the free enumeration instead,
+        # so a picker refresh cannot wake a phone or a companion app (see CAMERA_PROBE_ALL).
+        probe_indices: list[int] = []
+        for index in indices:
+            if _camera_is_quiet(index):
+                out[index] = _quiet_camera_entry(index, previous.get(index))
+            else:
+                probe_indices.append(index)
+        for start in range(0, len(probe_indices), CAMERA_PROBE_WAVE):
             if _CAM_PROBE_ABORT.is_set():
                 break
-            wave = indices[start : start + CAMERA_PROBE_WAVE]
+            wave = probe_indices[start : start + CAMERA_PROBE_WAVE]
             deadline = time.time() + deadline_s
             workers = [
                 threading.Thread(target=_probe_one_camera, args=(i, names, out, lock, deadline), daemon=True)

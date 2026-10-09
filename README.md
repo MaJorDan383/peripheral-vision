@@ -190,6 +190,7 @@ the Hermes backend (the desktop app inherits your user environment):
 | `PV_CAMERA_CACHE_S` | `600` | Seconds the enumerated camera list stays cached |
 | `PV_CAMERA_PROBE_TIMEOUT_S` | `5.0` | Timeout (seconds) for detecting one camera |
 | `PV_CAMERA_PROBE_WAVE` | `2` | Camera probe waves before giving up |
+| `PV_CAMERA_PROBE_ALL` | _(unset)_ | Set to `1` to probe every camera again. Probes skip virtual cameras — opening Phone Link's virtual camera pops its stream window — so those rows carry their remembered size until picked |
 
 Choosing the vision model is **not** an environment variable. Frames go to whatever can read them,
 in this order: the `auxiliary.vision` model picked in Hermes' own settings (Settings → Models) —

@@ -109,7 +109,8 @@ const INJECT_SOURCE = {
 }
 
 function SourceRow({ source, selected, onSelect, preview }) {
-  const size = `${source.width}×${source.height}`
+  // A camera the probe deliberately did not open has no measured size — say so, don't print undefined.
+  const size = source.width && source.height ? `${source.width}×${source.height}` : 'size unknown'
   const kind = source.kind || 'monitor'
   const isWindow = kind === 'window'
   const isCamera = kind === 'camera'
