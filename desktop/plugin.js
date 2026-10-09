@@ -160,13 +160,13 @@ function SourceRow({ source, selected, onSelect, preview }) {
             alt: preview.data.waiting ? 'last frame (minimized)' : 'live preview',
             title: shotNote,
             className:
-              'h-9 w-16 shrink-0 rounded border border-(--ui-stroke-secondary) bg-black/20 object-cover'
+              'h-[72px] w-[128px] shrink-0 rounded border border-(--ui-stroke-secondary) bg-black/20 object-cover'
           })
         : preview
           ? jsx('span', {
               title: failed || 'capturing…',
               className: cn(
-                'flex h-9 w-16 shrink-0 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[10px] text-(--ui-text-quaternary)',
+                'flex h-[72px] w-[128px] shrink-0 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[10px] text-(--ui-text-quaternary)',
                 failed ? '' : 'animate-pulse'
               ),
               children: failed ? 'no frame' : ''
@@ -185,7 +185,7 @@ function PreviewRow({ source, selected, onSelect, ctx }) {
   const isQuietCamera = source.kind === 'camera' && source.quiet
   const preview = useQuery({
     queryKey: [ID, 'preview', source.id],
-    queryFn: () => ctx.rest(`/preview?source_id=${encodeURIComponent(source.id)}&width=160`),
+    queryFn: () => ctx.rest(`/preview?source_id=${encodeURIComponent(source.id)}&width=320`),
     staleTime: 20000,
     refetchInterval: false,
     enabled: Boolean(source.id) && !isQuietCamera
