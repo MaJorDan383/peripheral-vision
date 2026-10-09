@@ -183,7 +183,7 @@ the Hermes backend (the desktop app inherits your user environment):
 | `PV_VISION_MAX_WIDTH` | `1024` | Older alias for the edge cap, and the width cap on the watch's own frames |
 | `PV_VISION_SQUARE` | _(unset)_ | Force a square intake (auto-enabled for CLIP-style encoders) |
 | `PV_VISION_PROMPT` | _(built-in)_ | Prompt sent with each frame for description |
-| `PV_VISION_INJECT_MODE` | `on_change` | When a fresh reading rides a turn; a pick in the desktop pane overrides it — see [Injection modes](#injection-modes) |
+| `PV_VISION_INJECT_MODE` | `on_mention` | When a fresh reading rides a turn; a pick in the desktop pane overrides it — see [Injection modes](#injection-modes) |
 | `PV_PREVIEW_MAX_AGE_S` | `6.0` | How stale the frame behind the pane preview may get while nothing moves (matches the pane's own 6s poll) |
 | `PV_SOURCE_FAILURE_LIMIT` | `3` | Consecutive capture failures before the watch stops |
 | `PV_CAMERA_MAX_INDEX` | `4` | Highest DirectShow camera index to probe |
@@ -229,9 +229,9 @@ environment/default value. The select's tooltip names where the current value co
 
 | Mode | What rides a turn |
 |------|-------------------|
-| `on_change` *(default)* | Only when the reading differs from the last one sent in that session — plus a re-send of unchanged content every 10 minutes, so a screen that never moves is still re-anchored instead of going silent for the rest of a long session |
+| `on_change` | Only when the reading differs from the last one sent in that session — plus a re-send of unchanged content every 10 minutes, so a screen that never moves is still re-anchored instead of going silent for the rest of a long session |
 | `always` | Every turn while the reading is fresh (what the plugin did before modes existed) |
-| `on_mention` | Only when your own message points at the screen — `screen`, `monitor`, `display`, `desktop`, `what do you see`, `can you see`, `look at`, `see this`, `this window`, `visible` (the full list is `MENTION_PATTERNS` in `__init__.py`, kept narrow on purpose: firing on the word "window" in "open a new window" costs tokens on a turn that never needed eyes) |
+| `on_mention` *(default)* | Only when your own message points at the screen — `screen`, `monitor`, `display`, `desktop`, `what do you see`, `can you see`, `look at`, `see this`, `this window`, `visible` (the full list is `MENTION_PATTERNS` in `__init__.py`, kept narrow on purpose: firing on the word "window" in "open a new window" costs tokens on a turn that never needed eyes) |
 | `tool_only` | Never ambient — reserved for builds that expose a live-view *tool*. This plugin registers no such tool, so the model is told nothing and the plugin logs a warning rather than looking like a silent failure |
 
 Every mode keeps the same hard gates: the capture loop must be **alive** — its heartbeat in
@@ -239,7 +239,7 @@ Every mode keeps the same hard gates: the capture loop must be **alive** — its
 instead of riding its last reading — and the newest frame must have arrived within the last 90
 seconds (a stale description is misleading, so it is never injected). The block is capped at 1200
 characters and 3 descriptions. An unrecognised value logs a warning once and falls back to
-`on_change`.
+`on_mention`.
 
 `on_change` compares the descriptions themselves, not the whole block: the header states the
 frame's age, which changes every turn, so a whole-text comparison would never match and the mode
@@ -308,7 +308,7 @@ This plugin captures screen content and enumerates window titles. Key facts:
   interval or pin a cheaper vision model if that matters to you.
 - **A watching turn can cost more tokens.** While the watch is running and the newest
   description is under 90 seconds old, up to ~1200 characters are eligible for injection — and
-  with the default `on_change` mode that happens once per changed reading, not once per turn.
+  with the default `on_mention` mode that happens only on turns that point at the screen.
 
 ## Language of descriptions
 

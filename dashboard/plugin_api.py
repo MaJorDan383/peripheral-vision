@@ -80,7 +80,7 @@ LOG_PATH = STATE_DIR / "log.jsonl"
 # runs in a different process and cannot reach this engine, so the request arrives as a file;
 # the loop consumes it on its next tick and stops the watch itself.
 STOP_REQUEST_PATH = STATE_DIR / "stop_request"
-DEFAULT_INTERVAL_MS = 2000
+DEFAULT_INTERVAL_MS = 5000
 DEFAULT_THRESHOLD = 85.0  # percent similarity above which a frame is "unchanged"
 # How stale the frame behind /preview may get while nothing moves. Unchanged ticks no longer pay the
 # intake resize + PNG encode, so the preview copy is refreshed on this cadence instead of every tick;
@@ -105,7 +105,7 @@ STATUS_HEARTBEAT_MAX_AGE_S = 120.0
 INJECT_MODE_PATH = STATE_DIR / "inject_mode"
 INJECT_MODE_ENV = "PV_VISION_INJECT_MODE"
 INJECT_MODES = ("always", "on_change", "on_mention", "tool_only")
-DEFAULT_INJECT_MODE = "on_change"
+DEFAULT_INJECT_MODE = "on_mention"
 
 LOG_KEEP = 400  # ring buffer size for descriptions
 

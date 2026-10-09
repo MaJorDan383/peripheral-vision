@@ -137,7 +137,7 @@ def test_an_unknown_mode_falls_back_to_the_default(
     monkeypatch.setenv(cv.INJECT_MODE_ENV, "somtimes")
     assert cv.inject_mode() == cv.DEFAULT_INJECT_MODE
     _write(state, _status())
-    assert cv.build_context(session_id="s1") is not None
+    assert cv.build_context(session_id="s1", user_message="look at my screen") is not None
 
 
 def test_the_mode_comes_from_the_environment(state: Path, monkeypatch: pytest.MonkeyPatch) -> None:

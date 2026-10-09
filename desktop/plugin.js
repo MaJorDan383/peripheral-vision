@@ -427,12 +427,12 @@ function PeripheralVisionPane({ ctx }) {
   // When fresh readings ride turns. Absent on a backend that predates POST /inject_mode —
   // the row below then does not render (nothing to pick against, no dead control).
   const injectState = data.inject_mode || null
-  const injectMode = injectPick || (injectState && injectState.mode) || 'on_change'
+  const injectMode = injectPick || (injectState && injectState.mode) || 'on_mention'
   const injectOrigin = injectPick ? 'pane' : (injectState && injectState.source) || 'default'
   // The blink rate — pane pick > backend state > default; '0' = manual, which puts the
   // Snapshot pair on that row (only a backend that advertises `snap` can serve it).
   const intervalState = data.interval || null
-  const intervalMs = intervalPick || (intervalState ? String(intervalState.ms) : '2000')
+  const intervalMs = intervalPick || (intervalState ? String(intervalState.ms) : '5000')
   const manualMode = intervalMs === '0'
   const snapshotsSupported = Boolean(data.snap)
   // The chat on screen — peripheral vision describes frames with ITS model.

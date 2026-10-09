@@ -54,7 +54,7 @@ MAX_DESCRIPTIONS = 3
 # on_mention : inject only when the user's own turn points at the screen
 # tool_only  : never ambient — for deployments that expose a live-view TOOL instead
 INJECT_MODES = ("always", "on_change", "on_mention", "tool_only")
-DEFAULT_INJECT_MODE = "on_change"
+DEFAULT_INJECT_MODE = "on_mention"
 INJECT_MODE_ENV = "PV_VISION_INJECT_MODE"
 
 # The pane's pick (POST /inject_mode in dashboard/plugin_api.py) is persisted to this file in the

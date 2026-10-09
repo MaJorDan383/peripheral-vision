@@ -112,3 +112,17 @@ def test_status_reports_the_mode_and_its_source(
     asyncio.run(api.post_inject_mode({"mode": "tool_only"}))
     payload = asyncio.run(api.get_status())
     assert payload["inject_mode"] == {"mode": "tool_only", "source": "pane"}
+
+
+def test_the_shipped_defaults_are_on_mention_and_five_seconds() -> None:
+    """What a fresh install — or a cleared state directory — starts from.
+
+    The two halves' constants are only compared to *each other* elsewhere, so a matching pair
+    could still drift away from the shipped values without a red test. This pins the values
+    themselves, and the pane's own fallbacks (used until /status answers) with them.
+    """
+    assert api.DEFAULT_INJECT_MODE == cv.DEFAULT_INJECT_MODE == "on_mention"
+    assert api.DEFAULT_INTERVAL_MS == 5000
+    pane = (PLUGIN_DIR / "desktop" / "plugin.js").read_text(encoding="utf-8")
+    assert "|| 'on_mention'" in pane, "the pane's mode fallback drifted from the backend's"
+    assert ": '5000'" in pane, "the pane's blink-rate fallback drifted from the backend's"

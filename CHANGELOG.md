@@ -5,6 +5,13 @@ All notable changes to this plugin. Nothing before the first public release was 
 
 ## [Unreleased]
 
+### Changed
+- **The out-of-the-box defaults are `on_mention` and a 5-second blink rate** (were `on_change`
+  and 2 s). Nothing anyone has already picked moves: a pane pick and `PV_VISION_INJECT_MODE`
+  still outrank these, so the new values only decide what a fresh install — or a cleared state
+  directory — starts from. `on_mention` keeps a watching plugin off turns that never asked for
+  eyes, and a 5 s blink rate checks a screen 12 times a minute instead of 30.
+
 ### Fixed
 - **Descriptions survive an auxiliary vision model that cannot serve.** A pick whose key,
   permission or endpoint refuses images (`400/401/403/404/405/422`, or a refused connection) is

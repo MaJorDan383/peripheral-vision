@@ -59,35 +59,35 @@ def _claim(path: Path, *, running: bool = True, heartbeat=..., now: float | None
 
 def test_a_live_loop_with_a_fresh_heartbeat_injects(status_file: Path) -> None:
     _claim(status_file, heartbeat=time.time())
-    assert cv.build_context() is not None
+    assert cv.build_context(mode="always") is not None
 
 
 def test_a_cold_heartbeat_is_refused_even_though_the_flag_says_running(status_file: Path) -> None:
     """The bug: the backend was killed, and the file still claims `running: true`."""
     _claim(status_file, heartbeat=time.time() - (cv.HEARTBEAT_MAX_AGE_S + 30))
-    assert cv.build_context() is None
+    assert cv.build_context(mode="always") is None
 
 
 def test_a_writer_too_old_to_heartbeat_is_still_honoured_when_the_file_is_fresh(status_file: Path) -> None:
     _claim(status_file)  # no heartbeat_at at all, file just written
-    assert cv.build_context() is not None
+    assert cv.build_context(mode="always") is not None
 
 
 def test_the_same_writer_is_refused_once_the_file_itself_goes_cold(status_file: Path) -> None:
     _claim(status_file)
     old = time.time() - (cv.HEARTBEAT_MAX_AGE_S + 60)
     os.utime(status_file, (old, old))
-    assert cv.build_context() is None
+    assert cv.build_context(mode="always") is None
 
 
 def test_a_stopped_loop_never_injects_however_fresh_the_heartbeat(status_file: Path) -> None:
     _claim(status_file, running=False, heartbeat=time.time())
-    assert cv.build_context() is None
+    assert cv.build_context(mode="always") is None
 
 
 def test_an_unreadable_heartbeat_fails_closed(status_file: Path) -> None:
     _claim(status_file, heartbeat="not-a-timestamp")
-    assert cv.build_context() is None
+    assert cv.build_context(mode="always") is None
 
 
 def test_both_halves_agree_on_the_tolerance() -> None:
