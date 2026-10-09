@@ -211,6 +211,18 @@ def camera_cache() -> dict:
     return {"at": 0.0, "devices": [], "probing": False, "thread": None}
 
 
+def camera_is_quiet(index: int) -> bool:
+    """True when this camera must not be opened outside a pick (see capture_windows).
+
+    The rule is Windows-specific (a virtual camera wakes its companion app when opened);
+    backends without it answer False — nothing to protect against.
+    """
+    be = _backend()
+    if hasattr(be, "_camera_is_quiet"):
+        return be._camera_is_quiet(index)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Window state (for snap upgrade logic)
 # ---------------------------------------------------------------------------

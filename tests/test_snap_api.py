@@ -81,10 +81,15 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(api, "_grab", lambda source: _frame())
     monkeypatch.setattr(api, "_grab_method", lambda: "screen")
     monkeypatch.setattr(api, "_grab_waiting", lambda: "")
+    # The quiet rule is Windows-enumeration state; hermetic tests must not touch it
+    # (individual tests stub it back to True to exercise the refusal).
+    monkeypatch.setattr(api, "capture_camera_is_quiet", lambda index: False)
     release = _Count()
     monkeypatch.setattr(api, "release_camera", release)
     abort = _Count()
     monkeypatch.setattr(api, "abort_camera_probe", abort)
+    monkeypatch.setitem(api._CAM_HANDLE, "cap", None)
+    monkeypatch.setitem(api._CAM_HANDLE, "index", None)
     api._SNAP.update(
         {
             "id": "",
@@ -574,6 +579,55 @@ def test_preview_by_source_id_resolves_a_camera(sandbox, monkeypatch) -> None:
     monkeypatch.setattr(api, "capture_camera_source", lambda index: cam)
     got = asyncio.run(api.get_preview(width=64, source_id="camera-2"))
     assert got["ok"] is True and got["data_url"].startswith("data:image/jpeg;base64,")
+    # The preview opened the device itself — nothing else would ever close it, so the
+    # release must fire on the way out or the LED would stay on after the picker closes.
+    assert sandbox.release.calls == 1, "a preview releases the camera it opened"
+
+
+def test_a_camera_preview_refuses_a_quiet_camera(sandbox, monkeypatch) -> None:
+    """A virtual camera is opened only by a pick — never by a thumbnail fetch.
+
+    Phone Link's camera pops its stream window the moment it is opened; the frontend
+    skips quiet rows, and this guard holds the line for anything that reaches the
+    route directly.
+    """
+    monkeypatch.setattr(api, "capture_camera_is_quiet", lambda index: True)
+    monkeypatch.setattr(api, "capture_camera_source", lambda index: _camera(1))
+    got = asyncio.run(api.get_preview(width=64, source_id="camera-1"))
+    assert got["ok"] is False and "never previewed" in got["error"]
+    assert sandbox.release.calls == 0, "a refused preview never opened anything"
+
+
+def test_a_camera_preview_leaves_the_watched_camera_open(sandbox, monkeypatch) -> None:
+    """A preview of the watched camera shares the watch's handle — releasing would blind it."""
+    monkeypatch.setattr(api, "capture_camera_source", lambda index: _camera(0))
+    monkeypatch.setitem(api._CAM_HANDLE, "cap", object())
+    monkeypatch.setitem(api._CAM_HANDLE, "index", 0)
+    got = asyncio.run(api.get_preview(width=64, source_id="camera-0"))
+    assert got["ok"] is True
+    assert sandbox.release.calls == 0, "the watch's handle stays open"
+
+
+def test_a_camera_preview_refuses_a_different_watched_camera(sandbox, monkeypatch) -> None:
+    """One shared handle: previewing another camera mid-watch would reset it every fetch."""
+    class _FakeThread:
+        def is_alive(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        api,
+        "ENGINE",
+        SimpleNamespace(
+            _thread=_FakeThread(),
+            monitor={"kind": "camera", "index": 0},
+            grab_method="camera",
+            waiting="",
+        ),
+    )
+    monkeypatch.setattr(api, "capture_camera_source", lambda index: _camera(2))
+    got = asyncio.run(api.get_preview(width=64, source_id="camera-2"))
+    assert got["ok"] is False and "cannot be opened" in got["error"]
+    assert sandbox.release.calls == 0
 
 
 def test_preview_by_source_id_reports_a_missing_source(sandbox, monkeypatch) -> None:

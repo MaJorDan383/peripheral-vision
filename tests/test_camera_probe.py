@@ -13,6 +13,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,15 +40,18 @@ class _Frame:
     shape = (480, 640, 3)
 
 
-def _fake_cv2(opened: list[int]) -> types.ModuleType:
+def _fake_cv2(opened: list[int], failing: set[int] = frozenset()) -> types.ModuleType:
     module = types.ModuleType("cv2")
 
     class _Capture:
         def __init__(self, index=0, backend=0):
             opened.append(int(index))
             self.index = int(index)
+            self._failing = int(index) in failing
 
         def read(self):
+            if self._failing:
+                return False, None
             return True, _Frame()
 
         def get(self, prop):
@@ -156,3 +160,153 @@ def test_no_enumeration_falls_back_to_probing_everything(probe, monkeypatch):
     cw._probe_cameras(5.0)
 
     assert probe == [0, 1, 2, 3]
+
+
+# ── enumeration pairing, index coverage, probe seriality ────────────────────
+
+
+# What this host's ffmpeg really prints: multi-pin devices carry several Alternative-name
+# lines and the audio section adds more — 8 video names against 21 alt-name lines. Pairing
+# by list length blanks every moniker (the bug), so the parse must walk line by line.
+FFMPEG_OUT = "\n".join(
+    [
+        '[dshow @ 0000] "HD Pro Webcam C920" (video)',
+        r'[dshow @ 0000]     Alternative name "@device_pnp_\\?\usb#vid_046d&pid_082d&mi_00#7&1361c34f&4&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global"',
+        '[dshow @ 0000] "J\'s S23 Ultra (Windows Virtual Camera)" (video)',
+        r'[dshow @ 0000]     Alternative name "@device_pnp_\\?\swd#vcamdevapi#596a16296e6b1f4a9612b95e5c3890372f74bc1e05cd624cc9b2b503cbaed850#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\{fcebba03-9d13-4c13-9940-cc84fcd132d1}"',
+        '[dshow @ 0000] "Camera (NVIDIA Broadcast)" (video)',
+        r'[dshow @ 0000]     Alternative name "@device_sw_{7BBFF097-B3FB-4B26-B685-7A998DE7CEAC}"',
+        r'[dshow @ 0000]     Alternative name "@device_sw_{9C981851-EB4B-44A1-B10B-E1315C91F700}"',
+        '[dshow @ 0000] "Microphone (USB)" (audio)',
+        r'[dshow @ 0000]     Alternative name "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{A3623370-9CFD-437F-886D-8A65FFE9E2D4}"',
+    ]
+)
+
+
+def test_monikers_pair_to_their_device_despite_multi_pin_output(probe, monkeypatch):
+    """Line-paired parse: audio lines and second pins must not blank or shift the monikers."""
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", lambda name: "ffmpeg" if name == "ffmpeg" else None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stderr=FFMPEG_OUT, stdout=""))
+
+    devices = cw._camera_devices()
+
+    assert [d["name"] for d in devices] == [
+        "HD Pro Webcam C920",
+        "J's S23 Ultra (Windows Virtual Camera)",
+        "Camera (NVIDIA Broadcast)",
+    ]
+    assert "usb#vid" in devices[0]["moniker"], "hardware keeps its PnP USB moniker"
+    assert "swd#vcamdevapi" in devices[1]["moniker"], "Phone Link's software device keeps its own"
+    assert devices[2]["moniker"].startswith("@device_sw_"), "first alternative name wins"
+    # …and the classification rides on those monikers:
+    assert cw._camera_is_quiet(0) is False  # USB hardware → probed
+    assert cw._camera_is_quiet(1) is True  # PnP-shaped but software → never opened
+    assert cw._camera_is_quiet(2) is True  # DirectShow filter → never opened
+
+
+def test_probe_covers_every_enumerated_camera(probe, enumerate_devices):
+    """Cameras past CAMERA_MAX_INDEX still reach the picker (this host has 8, ceiling was 4)."""
+    enumerate_devices(
+        *[
+            {"name": f"Cam {i}", "moniker": f"@device_pnp_\\\\?\\usb#vid_{i:04x}"}
+            for i in range(6)
+        ]
+    )
+    cw._probe_cameras(5.0)
+
+    assert probe == [0, 1, 2, 3, 4, 5], "index 5 is beyond the old ceiling but enumerated"
+
+
+def test_probes_open_one_camera_at_a_time(probe, enumerate_devices, monkeypatch):
+    """Concurrent DSHOW opens fail (measured on this host) — the probe must serialize them."""
+    import sys
+    import time as _time
+
+    state = {"live": 0, "peak": 0}
+    module = types.ModuleType("cv2")
+
+    class _Capture:
+        def __init__(self, index=0, backend=0):
+            state["live"] += 1
+            state["peak"] = max(state["peak"], state["live"])
+            self.index = int(index)
+            _time.sleep(0.02)  # widen any race window a regression would create
+
+        def read(self):
+            return True, _Frame()
+
+        def get(self, prop):
+            return 640 if prop == module.CAP_PROP_FRAME_WIDTH else 480
+
+        def release(self):
+            state["live"] -= 1
+
+    module.VideoCapture = _Capture
+    module.CAP_DSHOW = 700
+    module.CAP_PROP_FRAME_WIDTH = "w"
+    module.CAP_PROP_FRAME_HEIGHT = "h"
+    module.CAP_PROP_FOURCC = "f"
+    module.VideoWriter_fourcc = lambda *args: 0
+    monkeypatch.setitem(sys.modules, "cv2", module)
+
+    enumerate_devices(
+        *[
+            {"name": f"Cam {i}", "moniker": f"@device_pnp_\\\\?\\usb#vid_{i:04x}"}
+            for i in range(3)
+        ]
+    )
+    cw._probe_cameras(5.0)
+
+    assert state["peak"] == 1, f"two cameras were open at once (peak {state['peak']})"
+
+
+def test_a_busy_camera_keeps_the_row_it_had_last_time(probe, enumerate_devices, monkeypatch):
+    """A camera held by another app this round must not vanish from the picker."""
+    import sys
+
+    enumerate_devices(
+        HARDWARE,
+        {"name": "Second Cam", "moniker": "@device_pnp_\\\\?\\usb#vid_1111"},
+    )
+    cw._CAMERA_CACHE["devices"] = [
+        {
+            "id": "camera-1",
+            "kind": "camera",
+            "index": 1,
+            "label": "Second Cam",
+            "width": 1280,
+            "height": 720,
+            "readable": True,
+            "badge": "camera",
+            "default": False,
+        }
+    ]
+    monkeypatch.setitem(sys.modules, "cv2", _fake_cv2(probe, failing={1}))
+    cw._probe_cameras(5.0)
+
+    entries = _entries()
+    assert entries[0]["readable"] is True, "index 0 probed fresh"
+    assert (entries[1]["width"], entries[1]["height"]) == (1280, 720), (
+        "index 1 failed to open this round — it keeps the row it had instead of disappearing"
+    )
+
+
+def test_a_watched_camera_records_its_row_without_reopening(probe, enumerate_devices, monkeypatch):
+    """The watch already reads camera 0 — record it from the held handle, never reopen it."""
+    enumerate_devices(HARDWARE)
+
+    class _Held:
+        def get(self, prop):
+            return 640 if prop == "w" else 480
+
+    monkeypatch.setitem(cw._CAM_HANDLE, "cap", _Held())
+    monkeypatch.setitem(cw._CAM_HANDLE, "index", 0)
+    cw._probe_cameras(5.0)
+
+    entries = _entries()
+    assert 0 not in probe, "the held camera is read, never reopened"
+    assert entries[0]["readable"] is True, "a camera the watch is reading works by definition"
+    assert (entries[0]["width"], entries[0]["height"]) == (640, 480)

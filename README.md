@@ -186,10 +186,9 @@ the Hermes backend (the desktop app inherits your user environment):
 | `PV_VISION_INJECT_MODE` | `on_mention` | When a fresh reading rides a turn; a pick in the desktop pane overrides it — see [Injection modes](#injection-modes) |
 | `PV_PREVIEW_MAX_AGE_S` | `6.0` | How stale the frame behind the pane preview may get while nothing moves (matches the pane's own 6s poll) |
 | `PV_SOURCE_FAILURE_LIMIT` | `3` | Consecutive capture failures before the watch stops |
-| `PV_CAMERA_MAX_INDEX` | `4` | Highest DirectShow camera index to probe |
+| `PV_CAMERA_MAX_INDEX` | `4` | Probe floor — the probe covers every enumerated camera, never fewer than this |
 | `PV_CAMERA_CACHE_S` | `600` | Seconds the enumerated camera list stays cached |
 | `PV_CAMERA_PROBE_TIMEOUT_S` | `5.0` | Timeout (seconds) for detecting one camera |
-| `PV_CAMERA_PROBE_WAVE` | `2` | Camera probe waves before giving up |
 | `PV_CAMERA_PROBE_ALL` | _(unset)_ | Set to `1` to probe every camera again. Probes skip virtual cameras — opening Phone Link's virtual camera pops its stream window — so those rows carry their remembered size until picked |
 
 Choosing the vision model is **not** an environment variable. Frames go to whatever can read them,

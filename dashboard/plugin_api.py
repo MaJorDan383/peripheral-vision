@@ -53,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from capture import (
     abort_camera_probe as capture_abort_camera_probe,
     camera_cache as capture_camera_cache,
+    camera_is_quiet as capture_camera_is_quiet,
     camera_open as capture_camera_open,
     camera_source as capture_camera_source,
     cameras_probing as capture_cameras_probing,
@@ -1856,13 +1857,12 @@ def _reap_snap_if_stale() -> None:
         _snap_reset()
 
 
-def _snap_camera_busy_reason(source: dict[str, Any]) -> str:
-    """Why a snapshot may not open this camera right now ('' = allowed).
+def _snap_camera_busy_reason(source: dict[str, Any], action: str = "snapshot from") -> str:
+    """Why this camera may not be opened right now ('' = allowed).
 
-    There is ONE _CAM_HANDLE: while the watch holds a DIFFERENT camera, a snapshot
-    that opened this one would swap the handle back and forth every frame (each swap
-    is a device reset). Sharing the SAME camera is safe — every read is inside
-    _CAM_LOCK.
+    There is ONE _CAM_HANDLE: while the watch holds a DIFFERENT camera, opening this
+    one would swap the handle back and forth every frame (each swap is a device reset).
+    Sharing the SAME camera is safe — every read is inside _CAM_LOCK.
     """
     thread = getattr(ENGINE, "_thread", None)
     if thread is None or not thread.is_alive():
@@ -1874,7 +1874,7 @@ def _snap_camera_busy_reason(source: dict[str, Any]) -> str:
         return ""
     return (
         f"camera {source.get('index')} cannot be opened while camera {watched.get('index')} "
-        "is being watched — snapshot from the watched camera, or stop the watch"
+        f"is being watched — {action} the watched camera, or stop the watch"
     )
 
 
@@ -2628,6 +2628,30 @@ async def get_preview(
             )
         if not source:
             return {"ok": False, "error": "that source is no longer available"}
+        # Camera previews get two guards before anything is opened: a virtual camera is never
+        # opened unprompted (Phone Link's pops its stream window — the rule the probe obeys),
+        # and a camera other than the watched one must not swap the single shared handle
+        # under a running watch (each swap resets both devices).
+        release_after = False
+        if source.get("kind") == "camera":
+            if capture_camera_is_quiet(int(source.get("index") or -1)):
+                return {
+                    "ok": False,
+                    "error": "that camera is never previewed — pick it and start the watch to open it",
+                }
+            busy = _snap_camera_busy_reason(source, action="preview")
+            if busy:
+                return {"ok": False, "error": busy}
+            # Release only what THIS preview opened: a handle the watch (or a snapshot
+            # overlay) already held is theirs — mirroring _snap_reset's rule.
+            held = _CAM_HANDLE.get("cap")
+            held_index = _CAM_HANDLE.get("index")
+            release_after = (
+                held is None
+                or held_index is None
+                or source.get("index") is None
+                or int(held_index) != int(source.get("index"))
+            )
 
         def _capture() -> tuple[Optional[bytes], int, int, str, str, str, bool]:
             # A minimized window previews as its DWM last frame (the surface taskbar previews show);
@@ -2648,24 +2672,32 @@ async def get_preview(
             return shot, out_w, out_h, (_grab_method() if not last else "last-frame"), note, "", last
 
         try:
-            shot, out_w, out_h, method, waiting, failure, last = await asyncio.to_thread(_capture)
-        except (_SourceGone, _SourceMinimized) as exc:
-            return {"ok": False, "error": str(exc)}
-        except Exception as exc:
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        if failure:
-            return {"ok": False, "error": failure}
-        result = {
-            "ok": True,
-            "width": out_w,
-            "height": out_h,
-            "method": method or None,
-            "waiting": waiting or None,
-            "data_url": "data:image/jpeg;base64," + base64.b64encode(shot).decode("ascii"),
-        }
-        if last:
-            result["last_frame"] = True
-        return result
+            try:
+                shot, out_w, out_h, method, waiting, failure, last = await asyncio.to_thread(_capture)
+            except (_SourceGone, _SourceMinimized) as exc:
+                return {"ok": False, "error": str(exc)}
+            except Exception as exc:
+                return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            if failure:
+                return {"ok": False, "error": failure}
+            result = {
+                "ok": True,
+                "width": out_w,
+                "height": out_h,
+                "method": method or None,
+                "waiting": waiting or None,
+                "data_url": "data:image/jpeg;base64," + base64.b64encode(shot).decode("ascii"),
+            }
+            if last:
+                result["last_frame"] = True
+            return result
+        finally:
+            # A thumbnail must not leave the camera open — nothing else would ever close it
+            # (the LED would stay on after the picker is gone). Every failure path lands here.
+            # Off the event loop: the release waits on _CAM_LOCK, which a cold camera open
+            # holds for a second or two, and the loop must not stall with it.
+            if release_after:
+                await asyncio.to_thread(release_camera)
     cached = _preview_get(ENGINE.frame_seq, width)
     if cached is not None:
         return cached

@@ -156,7 +156,6 @@ _LAST_FRAME_LOCK = LAST_FRAME_LOCK
 CAMERA_MAX_INDEX = int(os.environ.get("PV_CAMERA_MAX_INDEX") or 4)
 CAMERA_CACHE_S = int(os.environ.get("PV_CAMERA_CACHE_S") or 600)
 CAMERA_PROBE_TIMEOUT_S = float(os.environ.get("PV_CAMERA_PROBE_TIMEOUT_S") or 5.0)
-CAMERA_PROBE_WAVE = int(os.environ.get("PV_CAMERA_PROBE_WAVE") or 2)
 
 CAMERA_MODES: tuple[tuple[int, int], ...] = ((3840, 2160), (1920, 1080), (1280, 720))
 _CAMERA_MODES: dict[int, tuple[int, int]] = {}
@@ -278,9 +277,13 @@ def _camera_devices() -> list[dict[str, str]]:
     """DirectShow video devices in enumeration order (matches cv2's index order).
 
     Each entry is ``{"name": ..., "moniker": ...}``. The moniker is what separates real hardware
-    (a PnP ``usb`` moniker) from a software/virtual camera (an ``sw``/``vcamdevapi`` moniker) — see
-    :func:`_camera_is_quiet`. Listing costs nothing: ffmpeg enumerates device names without
-    opening a stream.
+    (a PnP ``usb`` moniker) from a software/virtual camera — see :func:`_camera_is_quiet`. Listing
+    costs nothing: ffmpeg enumerates device names without opening a stream.
+
+    Parsed line by line, not by zipping two global findalls: one video name can print several
+    ``Alternative name`` lines and the audio section prints more still (measured on this host:
+    8 video names vs 21 alternative-name lines), so any count-based pairing blanks every moniker
+    and the quiet classification silently collapses to name-guessing.
     """
     global _CAMERA_DEVICES, _CAMERA_NAMES
     if _CAMERA_DEVICES is not None:
@@ -299,11 +302,19 @@ def _camera_devices() -> list[dict[str, str]]:
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
                 )
                 text = (proc.stderr or "") + (proc.stdout or "")
-                names = re.findall(r'"([^"]+)"\s*\(video\)', text)
-                monikers = re.findall(r'Alternative name\s*"([^"]*)"', text)
-                if len(monikers) != len(names):
-                    monikers = [""] * len(names)  # pairing untrustworthy — the names still stand
-                devices = [{"name": n, "moniker": m} for n, m in zip(names, monikers)]
+                current: Optional[dict[str, str]] = None
+                for line in text.splitlines():
+                    video = re.search(r'"([^"]+)"\s*\(video\)', line)
+                    if video:
+                        current = {"name": video.group(1), "moniker": ""}
+                        devices.append(current)
+                        continue
+                    if re.search(r'"[^"]+"\s*\(audio\)', line):
+                        current = None  # audio section: its alternative names attach to nothing here
+                        continue
+                    alt = re.search(r'Alternative name\s*"([^"]*)"', line)
+                    if alt is not None and current is not None and not current["moniker"]:
+                        current["moniker"] = alt.group(1)  # first alternative name is the video pin
         except Exception:
             devices = []
         _CAMERA_DEVICES = devices
@@ -320,9 +331,14 @@ def _camera_is_quiet(index: int) -> bool:
     """True when a probe must not open this device.
 
     Nothing is known about an index past the enumeration, so it is probed (the old behaviour);
-    a device with a PnP moniker is real hardware and probing it is free of side effects; every
-    other moniker is a software/virtual camera, which is left alone until it is picked. With no
-    moniker at all (an ffmpeg that did not print one) the name is the only signal.
+    real hardware is probed — it is free of side effects; every software/virtual device is left
+    alone until it is picked. With no moniker at all (an ffmpeg that did not print one) the name
+    is the only signal.
+
+    The API segment inside the moniker decides, not the prefix: Phone Link's virtual camera
+    enumerates as ``@device_pnp_\\?\\swd#vcamdevapi#…`` — a PnP prefix on a software device, so
+    trusting the prefix alone would probe it and pop the phone's stream window (the bug fixed by
+    the quiet rule in the first place).
     """
     if CAMERA_PROBE_ALL:
         return False
@@ -331,11 +347,17 @@ def _camera_is_quiet(index: int) -> bool:
         return False
     moniker = (devices[index].get("moniker") or "").strip().lower()
     name = (devices[index].get("name") or "").lower()
-    if moniker.startswith("@device_pnp_"):
-        return False
     if not moniker:
         return any(hint in name for hint in _CAMERA_VIRTUAL_HINTS)
-    return True
+    if "swd#" in moniker or "vcamdevapi" in moniker:
+        return True  # software device API — however PnP-shaped the prefix looks
+    if moniker.startswith("@device_sw_") or moniker.startswith("@device_cm_"):
+        return True  # DirectShow software filter
+    if "usb#" in moniker:
+        return False  # a USB function device: real hardware
+    if moniker.startswith("@device_pnp_"):
+        return False  # other PnP hardware — probe it, the old behaviour
+    return True  # any other moniker: treat as software, leave alone
 
 
 def _quiet_camera_entry(index: int, previous: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -368,62 +390,106 @@ def _quiet_camera_entry(index: int, previous: Optional[dict[str, Any]]) -> dict[
     return entry
 
 
-def _probe_one_camera(
-    index: int, names: list[str], out: dict[int, dict[str, Any]], lock: Any, deadline: float = 0.0
-) -> None:
-    """Open one camera, read a frame, close it. Runs on its own thread."""
-    with _CAM_LOCK:
-        if _CAM_HANDLE.get("cap") is not None and _CAM_HANDLE.get("index") == index:
-            return
+def _probe_one_camera(index: int, names: list[str], out: dict[int, dict[str, Any]], deadline: float = 0.0) -> None:
+    """Open one camera, read a frame, close it. Returns the row via ``out``.
+
+    The whole open→read→release runs under ``_CAM_LOCK`` and probes run one at a time:
+    two DSHOW opens racing in one process make each other fail fast (measured on this
+    host — camera 0 alone opens 3/3, paired with a second concurrent open it fails every
+    time), which silently dropped the real webcam from the cache and with it from the
+    picker. The lock also keeps a probe from opening a device the watch or a preview is
+    reading mid-frame.
+    """
     if deadline and time.time() > deadline:
         return
     if _CAM_PROBE_ABORT.is_set():
         return
-    cap = None
-    try:
-        import cv2
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        ok, frame = False, None
-        for attempt in range(3):
+    entry: Optional[dict[str, Any]] = None
+    with _CAM_LOCK:
+        held = _CAM_HANDLE.get("cap")
+        if held is not None and _CAM_HANDLE.get("index") == index:
+            # The watch is reading this camera right now — that IS a working camera. Record it
+            # from the held handle instead of reopening (or the row would vanish from the picker
+            # for as long as it is watched).
+            entry = _held_camera_entry(index, names, held)
+        else:
+            if deadline and time.time() > deadline:
+                return  # waited out the lock — out of budget
             if _CAM_PROBE_ABORT.is_set():
                 return
+            cap = None
             try:
-                ok, frame = cap.read()
-            except Exception:
+                import cv2
+                cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
                 ok, frame = False, None
-            if ok and frame is not None:
-                break
-            if attempt < 2:
-                time.sleep(0.12)
-        if not ok or frame is None:
-            return
+                for attempt in range(3):
+                    if _CAM_PROBE_ABORT.is_set():
+                        return
+                    try:
+                        ok, frame = cap.read()
+                    except Exception:
+                        ok, frame = False, None
+                    if ok and frame is not None:
+                        break
+                    if attempt < 2:
+                        time.sleep(0.12)
+                if not ok or frame is None:
+                    return
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
+                if not width and frame is not None:
+                    height, width = frame.shape[:2]
+                name = names[index] if index < len(names) else ""
+                entry = {
+                    "id": f"camera-{index}",
+                    "kind": "camera",
+                    "index": index,
+                    "label": name or f"Camera {index}",
+                    "name": name,
+                    "width": width,
+                    "height": height,
+                    "default": index == 0,
+                    "readable": bool(ok),
+                    "badge": "default" if index == 0 else "camera",
+                }
+            except Exception:
+                return
+            finally:
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+    if entry is not None:
+        out[index] = entry
+
+
+def _held_camera_entry(index: int, names: list[str], cap: Any) -> dict[str, Any]:
+    """The row for a camera the watch already holds open — readable by definition."""
+    name = names[index] if index < len(names) else ""
+    width = height = 0
+    try:
+        import cv2
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
-        if not width and frame is not None:
-            height, width = frame.shape[:2]
-        name = names[index] if index < len(names) else ""
-        entry = {
-            "id": f"camera-{index}",
-            "kind": "camera",
-            "index": index,
-            "label": name or f"Camera {index}",
-            "name": name,
-            "width": width,
-            "height": height,
-            "default": index == 0,
-            "readable": bool(ok),
-            "badge": "default" if index == 0 else "camera",
-        }
-        with lock:
-            out[index] = entry
     except Exception:
-        return
-    finally:
-        if cap is not None:
-            try:
-                cap.release()
-            except Exception:
-                pass
+        pass
+    if not width:
+        mode = _camera_mode(index)
+        if mode:
+            width, height = mode
+    return {
+        "id": f"camera-{index}",
+        "kind": "camera",
+        "index": index,
+        "label": name or f"Camera {index}",
+        "name": name,
+        "width": width,
+        "height": height,
+        "default": index == 0,
+        "readable": True,
+        "badge": "default" if index == 0 else "camera",
+    }
 
 
 def _probe_cameras(deadline_s: float) -> None:
@@ -432,8 +498,11 @@ def _probe_cameras(deadline_s: float) -> None:
         _CAM_PROBE_ABORT.clear()
         names = _camera_device_names()
         out: dict[int, dict[str, Any]] = {}
-        lock = threading.Lock()
-        indices = list(range(CAMERA_MAX_INDEX))
+        # Cover every device ffmpeg enumerated, not just the configured ceiling: this host
+        # lists 8 cameras while CAMERA_MAX_INDEX defaults to 4, so anything at index ≥ 4
+        # (NVIDIA Broadcast, HD Webcam T750…) never reached the picker at all. The ceiling
+        # still bounds the unknown tail when there is nothing to enumerate.
+        indices = list(range(max(CAMERA_MAX_INDEX, len(names))))
         previous = {
             int(device.get("index", -1)): device
             for device in _CAMERA_CACHE.get("devices") or []
@@ -447,19 +516,19 @@ def _probe_cameras(deadline_s: float) -> None:
                 out[index] = _quiet_camera_entry(index, previous.get(index))
             else:
                 probe_indices.append(index)
-        for start in range(0, len(probe_indices), CAMERA_PROBE_WAVE):
+        # One camera at a time, each with its own deadline: concurrent DSHOW opens in one
+        # process make each other fail (measured — the real webcam never survived a shared
+        # wave), and serial order keeps the cache deterministic.
+        for index in probe_indices:
             if _CAM_PROBE_ABORT.is_set():
                 break
-            wave = probe_indices[start : start + CAMERA_PROBE_WAVE]
-            deadline = time.time() + deadline_s
-            workers = [
-                threading.Thread(target=_probe_one_camera, args=(i, names, out, lock, deadline), daemon=True)
-                for i in wave
-            ]
-            for worker in workers:
-                worker.start()
-            for worker in workers:
-                worker.join(timeout=max(0.05, deadline - time.time()))
+            _probe_one_camera(index, names, out, deadline=time.time() + deadline_s)
+        for index in probe_indices:
+            if index not in out and index in previous:
+                # A camera busy elsewhere this round (held by OBS, deadline hit) keeps the row
+                # it had last time — a device the picker listed yesterday must not vanish
+                # today because one probe lost a race.
+                out[index] = previous[index]
         devices = [out[i] for i in sorted(out)]
         if devices:
             _CAMERA_CACHE["devices"] = devices
