@@ -110,6 +110,19 @@ const INJECT_SOURCE = {
 // box is 3.3x density: sharp on a HiDPI display and small in the row.
 const THUMB = { width: 96, height: 54 }
 
+// Virtual cameras arrive flagged (``quiet``) from both the enumeration and the route. Filter and
+// count them here as well, so the toggle is honest even while the running backend predates the
+// show-virtual flag — the desktop backend mounts plugin code at BOOT, so a Python edit needs that
+// process to respawn — and so the label is right either way. Once the backend filters too, this
+// is a no-op on an already-filtered list.
+function visibleCameras(data, showVirtual) {
+  const cameras = (data && data.cameras) || []
+  const shown = showVirtual ? cameras : cameras.filter(camera => !camera.quiet)
+  const hidden =
+    data && typeof data.cameras_hidden === 'number' ? data.cameras_hidden : cameras.length - shown.length
+  return { cameras: shown, hidden }
+}
+
 function SourceRow({ source, selected, onSelect, preview }) {
   // A camera the probe deliberately did not open has no measured size — say so, don't print undefined.
   const size = source.width && source.height ? `${source.width}×${source.height}` : 'size unknown'
@@ -432,12 +445,21 @@ function PeripheralVisionPane({ ctx }) {
     queryFn: () => ctx.rest('/status'),
     refetchInterval: 2500
   })
-  const sources = useQuery({
+  const sourceQuery = useQuery({
     queryKey: [ID, 'sources', showVirtual],
     queryFn: () => ctx.rest(`/sources${showVirtual ? '?show_virtual=1' : ''}`),
     enabled: true,
     refetchInterval: pickerOpen ? 5000 : false
   })
+  // What the pane renders: the same query with the camera rows filtered and the hidden count
+  // pinned, so every consumer (picker, snap menu, empty state) sees one honest list.
+  const cameraView = visibleCameras(sourceQuery.data, showVirtual)
+  const sources = {
+    ...sourceQuery,
+    data: sourceQuery.data
+      ? { ...sourceQuery.data, cameras: cameraView.cameras, cameras_hidden: cameraView.hidden }
+      : sourceQuery.data
+  }
   const data = status.data || {}
   const running = Boolean(data.running)
   // When fresh readings ride turns. Absent on a backend that predates POST /inject_mode —
