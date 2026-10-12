@@ -343,7 +343,10 @@ def _camera_is_quiet(index: int) -> bool:
     if CAMERA_PROBE_ALL:
         return False
     devices = _camera_devices()
-    if index >= len(devices):
+    if index < 0 or index >= len(devices):
+        # Unknown indices are probed (the old behaviour). The negative guard matters: a caller
+        # that computed the index with ``x or -1`` hands over -1 for camera 0, and devices[-1]
+        # would answer for the LAST device instead — refusing a real webcam as if it were virtual.
         return False
     moniker = (devices[index].get("moniker") or "").strip().lower()
     name = (devices[index].get("name") or "").lower()
@@ -1251,7 +1254,14 @@ def _grab_camera(source: dict[str, Any]):
                     pass
             cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
             if not cap.isOpened():
-                raise RuntimeError(f"Cannot open camera {index}")
+                # "Cannot open camera 0" on its own sends the user hunting for a plugin bug that
+                # is not there: a DSHOW open failure is nearly always another application holding
+                # the device (a call, a virtual-camera app, or a stale handle from an earlier
+                # session). Name the likely cause.
+                raise RuntimeError(
+                    f"Cannot open camera {index} — another application may be holding the device; "
+                    "close anything using it and refresh"
+                )
             _configure_camera_capture(cap, index)
             _CAM_HANDLE["cap"] = cap
             _CAM_HANDLE["index"] = index

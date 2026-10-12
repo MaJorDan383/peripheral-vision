@@ -598,6 +598,54 @@ def test_a_camera_preview_refuses_a_quiet_camera(sandbox, monkeypatch) -> None:
     assert sandbox.release.calls == 0, "a refused preview never opened anything"
 
 
+def test_camera_zero_preview_asks_about_camera_zero(sandbox, monkeypatch) -> None:
+    """Camera 0 is index 0 — a falsy index must never become the ``-1`` sentinel.
+
+    ``int(source.get("index") or -1)`` reads camera 0 as -1, and the classifier then answers
+    for devices[-1] (a virtual device on this host): the real webcam's thumbnail was refused
+    as "never previewed" while the row itself listed fine.
+    """
+    asked: list[int] = []
+
+    def _quiet(index: int) -> bool:
+        asked.append(index)
+        return index == -1  # only the sentinel itself would be refused
+
+    monkeypatch.setattr(api, "capture_camera_is_quiet", _quiet)
+    monkeypatch.setattr(api, "capture_camera_source", lambda index: _camera(0))
+    got = asyncio.run(api.get_preview(width=64, source_id="camera-0"))
+
+    assert asked == [0], "the guard asked about a different device than the row named"
+    assert got["ok"] is True, got.get("error")
+
+
+def test_sources_hide_virtual_cameras_unless_asked(sandbox, monkeypatch) -> None:
+    """The picker lists real cameras; a virtual one waits behind the show-virtual toggle.
+
+    Software devices (a phone's Windows Virtual Camera, headset feeds, broadcast filters)
+    enumerate for free, but listing them by default buries the one real webcam and invites a
+    mis-pick. The probe still records them — never opened — so the toggle costs no device:
+    it filters the same cached rows.
+    """
+    real = {**_camera(0), "quiet": False}
+    virtual = {**_camera(1), "quiet": True}
+    monkeypatch.setattr(
+        api,
+        "capture_list_sources",
+        lambda: {"monitors": [{"id": "monitor-0", "kind": "monitor"}], "windows": [], "cameras": [real, virtual]},
+    )
+
+    default = asyncio.run(api.get_sources())
+    assert [camera["id"] for camera in default["cameras"]] == ["camera-0"]
+    assert default["cameras_hidden"] == 1, "the toggle needs the count to label itself"
+    assert default["count"] == 2, "a hidden camera is not a listed source"
+
+    shown = asyncio.run(api.get_sources(show_virtual=True))
+    assert [camera["id"] for camera in shown["cameras"]] == ["camera-0", "camera-1"]
+    assert shown["cameras_hidden"] == 0
+    assert shown["count"] == 3
+
+
 def test_a_camera_preview_leaves_the_watched_camera_open(sandbox, monkeypatch) -> None:
     """A preview of the watched camera shares the watch's handle — releasing would blind it."""
     monkeypatch.setattr(api, "capture_camera_source", lambda index: _camera(0))

@@ -2287,17 +2287,26 @@ async def get_monitors() -> dict[str, Any]:
 
 
 @router.get("/sources")
-async def get_sources(refresh: bool = False) -> dict[str, Any]:
+async def get_sources(refresh: bool = False, show_virtual: bool = False) -> dict[str, Any]:
     """Every selectable source: displays, application windows and cameras.
 
     Enumeration touches Win32 and camera drivers, so it runs off the event loop and
     a cold camera probe continues in the background instead of holding the request.
+
+    Virtual cameras (a phone's Windows Virtual Camera, headset and broadcast filters) are
+    listed from the free enumeration and never opened, but they stay out of the default list:
+    a picker that shows them buries the real webcam. ``show_virtual=1`` returns them too.
     """
     if refresh:
         await asyncio.to_thread(capture_list_cameras, True)
     sources = await asyncio.to_thread(capture_list_sources)
+    cameras = sources.get("cameras") or []
+    shown = cameras if show_virtual else [camera for camera in cameras if not camera.get("quiet")]
     return {
         **sources,
+        "cameras": shown,
+        "count": len(sources.get("monitors") or []) + len(sources.get("windows") or []) + len(shown),
+        "cameras_hidden": len(cameras) - len(shown),
         "requires_selection": True,
         "cameras_probing": cameras_probing(),
         "refreshed_at": time.time(),
@@ -2634,7 +2643,10 @@ async def get_preview(
         # under a running watch (each swap resets both devices).
         release_after = False
         if source.get("kind") == "camera":
-            if capture_camera_is_quiet(int(source.get("index") or -1)):
+            # An explicit None check, never ``index or -1``: 0 is falsy, so that idiom sends
+            # camera 0 the sentinel and the real webcam gets refused as a virtual one.
+            index = source.get("index")
+            if index is None or capture_camera_is_quiet(int(index)):
                 return {
                     "ok": False,
                     "error": "that camera is never previewed — pick it and start the watch to open it",

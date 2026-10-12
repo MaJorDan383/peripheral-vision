@@ -153,6 +153,16 @@ def test_a_name_alone_can_mark_a_virtual_camera(probe, enumerate_devices):
     assert _entries()[1]["badge"] == "virtual"
 
 
+def test_a_negative_index_is_never_answered_from_the_end_of_the_list(probe, enumerate_devices):
+    """-1 is "unknown", never "the last camera".
+
+    A caller computing the index with ``x or -1`` hands over -1 for camera 0; answering that
+    from ``devices[-1]`` (a virtual device here) refuses a real webcam as if it were virtual.
+    """
+    enumerate_devices(HARDWARE, PHONE)
+    assert cw._camera_is_quiet(-1) is False, "an out-of-range index must not wrap"
+
+
 def test_no_enumeration_falls_back_to_probing_everything(probe, monkeypatch):
     """No ffmpeg (CI, a bare install) means no moniker: the old behaviour, never a silent skip."""
     monkeypatch.setattr(cw, "_CAMERA_DEVICES", [])

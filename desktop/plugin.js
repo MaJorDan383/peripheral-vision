@@ -103,6 +103,13 @@ const INJECT_SOURCE = {
   default: 'built-in default'
 }
 
+// The desktop's Tailwind CSS is compiled at app build time from the app's own source, never
+// from plugin files — so a utility class that only this file uses (``w-[128px]``, ``h-[72px]``)
+// never reaches the shipped stylesheet and the box silently loses its size. Size the thumbnail
+// with inline style; keep class names to ones the app itself uses. The 320px source in a 96px
+// box is 3.3x density: sharp on a HiDPI display and small in the row.
+const THUMB = { width: 96, height: 54 }
+
 function SourceRow({ source, selected, onSelect, preview }) {
   // A camera the probe deliberately did not open has no measured size — say so, don't print undefined.
   const size = source.width && source.height ? `${source.width}×${source.height}` : 'size unknown'
@@ -159,16 +166,17 @@ function SourceRow({ source, selected, onSelect, preview }) {
             src: shot,
             alt: preview.data.waiting ? 'last frame (minimized)' : 'live preview',
             title: shotNote,
-            className:
-              'h-[72px] w-[128px] shrink-0 rounded border border-(--ui-stroke-secondary) bg-black/20 object-cover'
+            className: 'shrink-0 rounded border border-(--ui-stroke-secondary) object-cover',
+            style: { ...THUMB, backgroundColor: 'rgba(0, 0, 0, 0.2)' }
           })
         : preview
           ? jsx('span', {
               title: failed || 'capturing…',
               className: cn(
-                'flex h-[72px] w-[128px] shrink-0 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[10px] text-(--ui-text-quaternary)',
+                'flex shrink-0 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[10px] text-(--ui-text-quaternary)',
                 failed ? '' : 'animate-pulse'
               ),
+              style: THUMB,
               children: failed ? 'no frame' : ''
             })
           : null
@@ -360,6 +368,7 @@ function SnapMenu({ ctx, sources, kind, disabled, onPick }) {
 function PeripheralVisionPane({ ctx }) {
   const queryClient = useQueryClient()
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [showVirtual, setShowVirtual] = useState(false)
   const [chosen, setChosen] = useState(null)
   // The Blink-rate pick: optimistic while its POST is in flight; '0' is manual snapshots.
   const [intervalPick, setIntervalPick] = useState('')
@@ -424,8 +433,8 @@ function PeripheralVisionPane({ ctx }) {
     refetchInterval: 2500
   })
   const sources = useQuery({
-    queryKey: [ID, 'sources'],
-    queryFn: () => ctx.rest('/sources'),
+    queryKey: [ID, 'sources', showVirtual],
+    queryFn: () => ctx.rest(`/sources${showVirtual ? '?show_virtual=1' : ''}`),
     enabled: true,
     refetchInterval: pickerOpen ? 5000 : false
   })
@@ -1115,14 +1124,36 @@ function PeripheralVisionPane({ ctx }) {
                           jsx('span', {
                             children: sources.data.cameras_probing
                               ? 'scanning for cameras…'
-                              : 'No camera was detected.'
+                              : sources.data.cameras_hidden
+                                ? `No real camera was detected — ${sources.data.cameras_hidden} virtual one${sources.data.cameras_hidden === 1 ? '' : 's'} hidden.`
+                                : 'No camera was detected.'
                           })
                         ]
                       : null,
-                    foot: jsx('span', {
-                      className: 'text-xs text-(--ui-text-quaternary)',
-                      children:
-                        'A camera frame is described and sent like any other capture — the camera LED stays on while it is watched, and turns off when watching stops.'
+                    foot: jsxs('div', {
+                      className: 'flex flex-col gap-1',
+                      children: [
+                        jsxs('label', {
+                          className: 'flex cursor-pointer items-center gap-1.5 text-xs text-(--ui-text-quaternary)',
+                          children: [
+                            jsx('input', {
+                              type: 'checkbox',
+                              checked: showVirtual,
+                              onChange: event => setShowVirtual(Boolean(event.target.checked))
+                            }),
+                            jsx('span', {
+                              children: sources.data && sources.data.cameras_hidden
+                                ? `Show virtual cameras (${sources.data.cameras_hidden} hidden)`
+                                : 'Show virtual cameras'
+                            })
+                          ]
+                        }),
+                        jsx('span', {
+                          className: 'text-xs text-(--ui-text-quaternary)',
+                          children:
+                            'A camera frame is described and sent like any other capture — the camera LED stays on while it is watched, and turns off when watching stops.'
+                        })
+                      ]
                     })
                   })
                     ]
