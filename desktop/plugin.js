@@ -1218,10 +1218,16 @@ function PeripheralVisionPane({ ctx }) {
                   jsxs('div', {
                     ref: snapBoxRef,
                     className:
-                      'relative select-none overflow-hidden rounded-md border border-(--ui-stroke-secondary) bg-black/20',
+                      'relative select-none overflow-hidden rounded-md border border-(--ui-stroke-secondary)',
                     style: snapStill
-                      ? { touchAction: 'none', cursor: 'crosshair', width: 'fit-content', margin: '0 auto' }
-                      : { touchAction: 'none', cursor: 'crosshair' },
+                      ? {
+                          touchAction: 'none',
+                          cursor: 'crosshair',
+                          width: 'fit-content',
+                          margin: '0 auto',
+                          backgroundColor: 'rgba(0, 0, 0, 0.2)'
+                        }
+                      : { touchAction: 'none', cursor: 'crosshair', backgroundColor: 'rgba(0, 0, 0, 0.2)' },
                     onPointerDown: onSnapPointerDown,
                     onPointerMove: onSnapPointerMove,
                     onPointerUp: onSnapPointerUp,
