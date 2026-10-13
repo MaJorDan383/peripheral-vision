@@ -8,7 +8,9 @@ Three defects lived here, none of them visible without a real desktop:
   * the DWM path could never work at all (window handle where a thumbnail handle belongs, a
     non-existent ``DwmUpdateThumbnail``, an invented ``dwSize``/``fMask`` struct, and a host
     window created with a wndproc in the class-name slot).
-None of that needs a window to pin: Win32 is faked and the images are synthetic.
+
+None of that needs a window to pin: Win32 is faked and the frames are synthetic. No numpy either —
+the suite's CI installs pytest, fastapi and Pillow only.
 """
 from __future__ import annotations
 
@@ -18,9 +20,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
-from PIL import Image, ImageGrab
+from PIL import Image, ImageGrab, ImageStat
 
 PLUGIN_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(PLUGIN_DIR / "dashboard"))
@@ -36,19 +37,32 @@ def _load(name: str, path: Path):
 cw = _load("peripheral_vision_backend_half_window_capture", PLUGIN_DIR / "dashboard" / "capture_windows.py")
 
 
-def _content(level: int = 200) -> Image.Image:
-    """A frame with real detail in it — `_is_blank` compares the standard deviation."""
-    rng = np.random.default_rng(level)
-    return Image.fromarray(rng.integers(0, min(level, 255) + 1, (6, 8, 3), dtype="uint8"))
+def _content() -> Image.Image:
+    """A frame with real detail in it — the blank rule looks at the spread of pixel values."""
+    img = Image.new("RGB", (8, 6), (0, 0, 0))
+    for x in range(8):
+        for y in range(6):
+            img.putpixel((x, y), (255 if (x + y) % 2 else 30, x * 30 % 256, y * 40 % 256))
+    return img
 
 
 def _black() -> Image.Image:
     return Image.new("RGB", (8, 6), (0, 0, 0))
 
 
+def _brightness(img: Image.Image) -> float:
+    return sum(ImageStat.Stat(img).mean) / 3
+
+
+def _is_blank(img: Image.Image) -> bool:
+    """The blank rule, stated here so these tests never depend on numpy being installed."""
+    low, high = img.convert("L").getextrema()
+    return high - low <= 1
+
+
 @pytest.fixture()
-def win32(monkeypatch):
-    """Fake the Win32 layer so the ladder runs anywhere (Linux CI included)."""
+def windows_env(monkeypatch):
+    """A fake Win32 layer plus a deterministic blank rule, so the ladder runs anywhere."""
     state = SimpleNamespace(is_window=True, is_iconic=False)
     user32 = SimpleNamespace(
         IsWindow=lambda handle: state.is_window,
@@ -60,6 +74,7 @@ def win32(monkeypatch):
         SimpleNamespace(user32=user32, gdi32=SimpleNamespace(), kernel32=SimpleNamespace()),
         raising=False,
     )
+    monkeypatch.setattr(cw, "_is_blank", _is_blank)
     return state
 
 
@@ -70,34 +85,34 @@ def screen_grab(monkeypatch):
 
     def _grab(bbox=None):
         calls.append(bbox)
-        return _content(200)
+        return _content()
 
     monkeypatch.setattr(ImageGrab, "grab", _grab)
     return calls
 
 
-def test_the_ladder_prefers_a_working_printwindow(win32, screen_grab, monkeypatch):
-    monkeypatch.setattr(cw, "_grab_window_printwindow", lambda source: _content(200))
+def test_the_ladder_prefers_a_working_printwindow(windows_env, screen_grab, monkeypatch):
+    monkeypatch.setattr(cw, "_grab_window_printwindow", lambda source: _content())
     monkeypatch.setattr(cw, "_grab_window_thumbnail", lambda source: pytest.fail("thumbnail must not run"))
 
     img = cw._grab_window({"hwnd": 11})
 
-    assert np.array(img).max() >= 190
+    assert _brightness(img) > 50
     assert screen_grab == [], "a working capture never reaches the screen"
 
 
-def test_a_blank_printwindow_falls_through_to_the_thumbnail(win32, screen_grab, monkeypatch):
+def test_a_blank_printwindow_falls_through_to_the_thumbnail(windows_env, screen_grab, monkeypatch):
     """PrintWindow prints pure black for plenty of real apps here — that must not end the attempt."""
     monkeypatch.setattr(cw, "_grab_window_printwindow", lambda source: _black())
-    monkeypatch.setattr(cw, "_grab_window_thumbnail", lambda source: _content(200))
+    monkeypatch.setattr(cw, "_grab_window_thumbnail", lambda source: _content())
 
     img = cw._grab_window({"hwnd": 12})
 
-    assert np.array(img).max() >= 190
+    assert _brightness(img) > 50
     assert screen_grab == [], "the DWM thumbnail answered it — no screen grab needed"
 
 
-def test_a_covered_window_is_never_answered_with_a_screen_grab(win32, screen_grab, monkeypatch):
+def test_a_covered_window_is_never_answered_with_a_screen_grab(windows_env, screen_grab, monkeypatch):
     """The reported bug: every row showed the focused app, because the grab returns what covers it."""
     monkeypatch.setattr(cw, "_grab_window_printwindow", lambda source: _black())
     monkeypatch.setattr(cw, "_grab_window_thumbnail", lambda source: _black())
@@ -110,7 +125,7 @@ def test_a_covered_window_is_never_answered_with_a_screen_grab(win32, screen_gra
     assert screen_grab == [], "a covered window must fail honestly, not show whatever is on top"
 
 
-def test_the_screen_grab_is_used_when_the_window_is_on_top(win32, screen_grab, monkeypatch):
+def test_the_screen_grab_is_used_when_the_window_is_on_top(windows_env, screen_grab, monkeypatch):
     monkeypatch.setattr(cw, "_grab_window_printwindow", lambda source: _black())
     monkeypatch.setattr(cw, "_grab_window_thumbnail", lambda source: _black())
     monkeypatch.setattr(cw, "_window_is_on_top", lambda hwnd: True)
@@ -119,19 +134,19 @@ def test_the_screen_grab_is_used_when_the_window_is_on_top(win32, screen_grab, m
     img = cw._grab_window({"hwnd": 14})
 
     assert screen_grab == [(5, 6, 105, 106)], "an unobstructed window may be grabbed from the screen"
-    assert np.array(img).max() >= 190
+    assert _brightness(img) > 50
     assert cw._GRAB_STATE.method == "screen"
 
 
-def test_a_minimized_window_goes_straight_to_the_thumbnail(win32, monkeypatch):
+def test_a_minimized_window_goes_straight_to_the_thumbnail(windows_env, monkeypatch):
     """A minimized window has no pixels of its own — DWM keeps its last frame."""
-    win32.is_iconic = True
+    windows_env.is_iconic = True
     monkeypatch.setattr(cw, "_grab_window_printwindow", lambda source: pytest.fail("no PrintWindow for minimized"))
-    monkeypatch.setattr(cw, "_grab_window_thumbnail", lambda source: _content(200))
+    monkeypatch.setattr(cw, "_grab_window_thumbnail", lambda source: _content())
 
     img = cw._grab_window({"hwnd": 15})
 
-    assert np.array(img).max() >= 190
+    assert _brightness(img) > 50
 
 
 def test_the_dwm_properties_match_the_win32_layout():
