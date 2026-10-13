@@ -176,6 +176,63 @@ _CAMERA_VIRTUAL_HINTS = (
 # mark a camera virtual: doing so hid the real webcam behind the show-virtual toggle.
 _DSHOW_VIDEO_CATEGORY = "{860bb310-5d01-11d0-bd3b-00a0c911ce86}"
 
+# Windows' own device names, for the one classification the moniker cannot settle. Cached: the
+# probe asks for it once, not once per device.
+_PNP_NAMES_TTL_S = 60.0
+_PNP_NAMES_CACHE: dict[str, Any] = {"at": 0.0, "names": None}
+_PNP_LOCK = threading.Lock()
+
+
+def _windows_device_names() -> Optional[set[str]]:
+    """Lowercased Windows device names, or None when the query itself failed.
+
+    None means "unknown", and unknown is treated as real hardware (see `_camera_is_quiet`): hiding
+    a real camera is the worse mistake, so the ambiguity resolves toward showing it.
+    """
+    with _PNP_LOCK:
+        if _PNP_NAMES_CACHE["names"] is not None and time.time() - _PNP_NAMES_CACHE["at"] < _PNP_NAMES_TTL_S:
+            return _PNP_NAMES_CACHE["names"]
+        names: Optional[set[str]] = None
+        try:
+            import subprocess
+
+            proc = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-PnpDevice -ErrorAction SilentlyContinue | "
+                    "Select-Object -ExpandProperty FriendlyName",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+            )
+            if proc.returncode == 0:
+                names = {line.strip().lower() for line in proc.stdout.splitlines() if line.strip()}
+        except Exception:
+            names = None
+        _PNP_NAMES_CACHE["names"] = names
+        _PNP_NAMES_CACHE["at"] = time.time()
+        return names
+
+
+def _windows_knows_device(name: str) -> bool:
+    """True when some Windows device answers to this DirectShow name.
+
+    A camera the system never had still keeps its device instance (the C920 here is unplugged and
+    still listed by `Get-PnpDevice`, present=False) — whereas a name nothing in Windows knows is a
+    filter some application installed. That is the only way to tell them apart: the moniker shape
+    is identical for both (this host's real webcam reported the bare video-category CLSID too).
+    """
+    names = _windows_device_names()
+    if names is None:
+        return True  # unknown → do not hide a camera over a failed query
+    wanted = (name or "").strip().lower()
+    return bool(wanted) and any(wanted in known or known == wanted for known in names)
+
 
 def _camera_mode(index: int) -> Optional[tuple[int, int]]:
     """The mode this camera settled on last time, if it is known."""
@@ -357,12 +414,16 @@ def _camera_is_quiet(index: int) -> bool:
     if moniker.startswith("@device_cm_"):
         return True  # DirectShow software filter (a COM software device)
     if moniker.startswith("@device_sw_"):
-        # A software-device moniker. The bare video-category CLSID is what EVERY dshow
-        # device without a resolvable PnP path reports — real webcams included — so it is
-        # not a virtual signal; decide that case by name. An unnamed, unhinted device is
-        # unknown, and unknown is probed, never silently hidden.
+        # A software-device moniker. The bare video-category CLSID is what EVERY dshow device
+        # without a resolvable PnP path reports — real webcams included — so it is not a virtual
+        # signal; decide that case by name, and then by whether Windows knows the device at all.
         if _DSHOW_VIDEO_CATEGORY in moniker:
-            return any(hint in name for hint in _CAMERA_VIRTUAL_HINTS)
+            if any(hint in name for hint in _CAMERA_VIRTUAL_HINTS):
+                return True
+            # The ambiguous shape: real webcams report it (this host's C920 did) and so do filters
+            # an app installed — "HD Webcam T750" returns synthetic frames and no Windows device
+            # answers to that name. Windows' own device list is the tiebreaker.
+            return not _windows_knows_device(devices[index].get("name") or "")
         return True
     if "usb#" in moniker:
         return False  # a USB function device: real hardware

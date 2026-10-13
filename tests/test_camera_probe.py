@@ -84,6 +84,10 @@ def probe(tmp_path, monkeypatch) -> list[int]:
     monkeypatch.setattr(cw, "_CAMERA_DEVICES", None)
     monkeypatch.setattr(cw, "_CAMERA_CACHE", {"devices": [], "at": 0.0, "probing": True, "thread": None})
     monkeypatch.setattr(cw, "_CAM_HANDLE", {"cap": None, "index": -1})
+    # Windows' device list is a host fact — the probe must not shell out from a test. The default
+    # says "no device by that name", i.e. the ambiguous-filter case; tests that need a known
+    # device override it.
+    monkeypatch.setattr(cw, "_windows_knows_device", lambda name: False)
     return opened
 
 
@@ -156,6 +160,23 @@ def test_real_hardware_that_will_not_open_stays_listed(probe, enumerate_devices,
     row = _entries()[0]
     assert not row.get("quiet"), "a USB camera must not be hidden because one read failed"
     assert row.get("readable") is False
+
+
+def test_a_device_windows_knows_is_still_a_camera(probe, enumerate_devices, monkeypatch):
+    """The bare-CLSID shape is ambiguous, so Windows' own device list decides it.
+
+    A real webcam reports it (this host's C920 did) and so can a filter an application installed;
+    a name Windows has a device for is real hardware and must be probed and listed.
+    """
+    monkeypatch.setattr(cw, "_windows_knows_device", lambda name: True)
+    enumerate_devices(
+        {"name": "HD Pro Webcam C920", "moniker": "@device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}#{A3FCE0F5}"}
+    )
+    cw._probe_cameras(5.0)
+
+    row = _entries()[0]
+    assert not row.get("quiet"), "a device Windows knows must not be hidden behind the toggle"
+    assert row.get("readable") is True
 
 
 def test_remembered_state_follows_the_device_not_the_position(probe, enumerate_devices):
