@@ -371,6 +371,28 @@ def _camera_is_quiet(index: int) -> bool:
     return True  # any other moniker: treat as software, leave alone
 
 
+def _camera_is_software_shaped(index: int) -> bool:
+    """True when the moniker says software and never says USB hardware.
+
+    Used for a device the probe could not open: hardware that fails is still hardware and stays
+    listed (it may be held by another app), while a software-shaped device that cannot be read is
+    a stale or virtual filter — this host advertises "HD Webcam T750" with no such device in
+    Windows at all — which belongs behind the picker's virtual toggle, not in the camera list.
+    """
+    devices = _camera_devices()
+    if index < 0 or index >= len(devices):
+        return False
+    moniker = (devices[index].get("moniker") or "").strip().lower()
+    if not moniker or "usb#" in moniker:
+        return False
+    return (
+        "swd#" in moniker
+        or "vcamdevapi" in moniker
+        or moniker.startswith("@device_sw_")
+        or moniker.startswith("@device_cm_")
+    )
+
+
 def _quiet_camera_entry(index: int, previous: Optional[dict[str, Any]]) -> dict[str, Any]:
     """The picker row for a device a probe must not open.
 
@@ -548,17 +570,37 @@ def _probe_cameras(deadline_s: float) -> None:
         # (NVIDIA Broadcast, HD Webcam T750…) never reached the picker at all. The ceiling
         # still bounds the unknown tail when there is nothing to enumerate.
         indices = list(range(max(CAMERA_MAX_INDEX, len(names))))
-        previous = {
-            int(device.get("index", -1)): device
-            for device in _CAMERA_CACHE.get("devices") or []
-            if isinstance(device, dict)
+        cached_rows = [
+            device for device in _CAMERA_CACHE.get("devices") or [] if isinstance(device, dict)
+        ]
+        # Remembered state is looked up by DEVICE, not by position. A DirectShow index is a
+        # position in a list that shifts whenever any camera appears or disappears (this host's
+        # phone camera comes and goes), so an index-keyed lookup hands one device's size or
+        # "readable" claim to whichever device now sits there. The name identifies the device;
+        # the index stays only as a fallback for rows that carry no name at all.
+        by_name = {
+            str(device.get("name") or device.get("label") or ""): device for device in cached_rows
         }
+        by_index = {int(device.get("index", -1)): device for device in cached_rows}
+
+        def remembered(index: int) -> dict[str, Any]:
+            name = names[index] if 0 <= index < len(names) else ""
+            row = by_name.get(name) if name else None
+            if row is None:
+                # Position is trusted only for a row that identifies no device at all (a legacy
+                # cache entry). A row that names a different device must not be inherited by
+                # whoever now occupies that index.
+                fallback = by_index.get(index) or {}
+                if not (fallback.get("name") or fallback.get("label")):
+                    row = fallback or None
+            return row or {}
+
         # A quiet device is never opened — its row is answered from the free enumeration instead,
         # so a picker refresh cannot wake a phone or a companion app (see CAMERA_PROBE_ALL).
         probe_indices: list[int] = []
         for index in indices:
             if _camera_is_quiet(index):
-                out[index] = _quiet_camera_entry(index, previous.get(index))
+                out[index] = _quiet_camera_entry(index, remembered(index) or None)
             else:
                 probe_indices.append(index)
         # One camera at a time, each with its own deadline: concurrent DSHOW opens in one
@@ -571,12 +613,18 @@ def _probe_cameras(deadline_s: float) -> None:
         for index in probe_indices:
             if index in out:
                 continue
-            prev = previous.get(index) or {}
+            prev = remembered(index)
             if prev and not prev.get("quiet"):
                 # A camera busy elsewhere this round (held by OBS, deadline hit) keeps the row
                 # it had last time — a device the picker listed yesterday must not vanish
                 # today because one probe lost a race.
                 out[index] = prev
+            elif _camera_is_software_shaped(index):
+                # A software-shaped device that will not open is a stale or virtual filter, not a
+                # camera anybody can pick: this host advertises "HD Webcam T750", which has no
+                # device in Windows at all, and it was showing up in the picker as a dead webcam.
+                # Answer it from the enumeration instead and let the virtual toggle reveal it.
+                out[index] = _quiet_camera_entry(index, prev)
             else:
                 # The probe could not read it (no working OpenCV camera backend on this host,
                 # the device is held, or the deadline hit) and no usable cached row exists:

@@ -127,6 +127,66 @@ def test_a_quiet_row_carries_the_remembered_size(probe, enumerate_devices):
     assert (entry["width"], entry["height"]) == (1280, 720), "the mode it settled on last time"
 
 
+def test_a_software_filter_that_will_not_open_is_hidden_not_listed(probe, enumerate_devices, monkeypatch):
+    """A software-shaped device the probe cannot read is a stale filter, not a pickable camera.
+
+    This host advertises "HD Webcam T750" (a DirectShow filter with no device in Windows) whose
+    name carries none of the virtual hints, so it was probed, failed, and still landed in the
+    picker as a dead webcam.
+    """
+    import sys
+
+    enumerate_devices({"name": "HD Webcam T750", "moniker": "@device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}#{A3FCE0F5}"})
+    monkeypatch.setitem(sys.modules, "cv2", _fake_cv2(probe, failing={0}))
+    cw._probe_cameras(5.0)
+
+    row = _entries()[0]
+    assert row.get("quiet") is True, f"a dead software filter must be hidden by default, got {row}"
+    assert row.get("readable") is None, "nobody read it, so nothing may claim it is unreadable"
+
+
+def test_real_hardware_that_will_not_open_stays_listed(probe, enumerate_devices, monkeypatch):
+    """Hardware that fails to open is still hardware — it may be held by another app."""
+    import sys
+
+    enumerate_devices(HARDWARE)
+    monkeypatch.setitem(sys.modules, "cv2", _fake_cv2(probe, failing={0}))
+    cw._probe_cameras(5.0)
+
+    row = _entries()[0]
+    assert not row.get("quiet"), "a USB camera must not be hidden because one read failed"
+    assert row.get("readable") is False
+
+
+def test_remembered_state_follows_the_device_not_the_position(probe, enumerate_devices):
+    """A DirectShow index is a position in a list that shifts — memory must key on the device.
+
+    This host's phone camera comes and goes, so index 0 is sometimes the phone's virtual camera
+    and sometimes something else. An index-keyed lookup hands the previous occupant's "readable"
+    claim and size to whatever lands there next.
+    """
+    cw._CAMERA_CACHE["devices"] = [
+        {
+            "id": "camera-0",
+            "index": 0,
+            "name": "J's S23 Ultra (Windows Virtual Camera)",
+            "label": "J's S23 Ultra (Windows Virtual Camera)",
+            "readable": True,
+            "width": 2304,
+            "height": 1536,
+        }
+    ]
+    enumerate_devices(
+        {"name": "Meta Quest 3", "moniker": "@device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}#{0FEDCBA9}"}
+    )
+    cw._probe_cameras(5.0)
+
+    row = _entries()[0]
+    assert row.get("quiet") is True
+    assert row.get("readable") is None, "a different device inherited the phone camera's claim"
+    assert (row.get("width"), row.get("height")) != (2304, 1536), "it inherited its size too"
+
+
 def test_a_previous_readable_is_carried_forward(probe, enumerate_devices):
     enumerate_devices(HARDWARE, PHONE)
     cw._CAMERA_CACHE["devices"] = [{"id": "camera-1", "index": 1, "readable": True}]
