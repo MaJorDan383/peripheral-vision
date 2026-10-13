@@ -354,6 +354,61 @@ def test_probes_open_one_camera_at_a_time(probe, enumerate_devices, monkeypatch)
     assert state["peak"] == 1, f"two cameras were open at once (peak {state['peak']})"
 
 
+def test_a_black_warmup_frame_is_not_returned(probe):
+    """A DSHOW camera hands over one black frame when the capture mode changes.
+
+    Measured on this host: after the mode negotiation the first read came back mean=0.0 and the
+    second was the real image. The watch treats two identical frames as "unchanged", so a black
+    opener made every later tick skip and left its preview black.
+    """
+
+    class _Frame:
+        def __init__(self, spread):
+            self._spread = spread
+
+        def std(self):
+            return self._spread
+
+    class _Cap:
+        def __init__(self, frames):
+            self._frames = list(frames)
+            self.reads = 0
+
+        def read(self):
+            frame = self._frames[min(self.reads, len(self._frames) - 1)]
+            self.reads += 1
+            return True, frame
+
+    cap = _Cap([_Frame(0.0), _Frame(48.0)])
+    ok, frame = cw._read_live_frame(cap, attempts=5, pause=0.0)
+
+    assert ok is True
+    assert frame.std() == 48.0, "the black warm-up frame was handed to the engine"
+    assert cap.reads == 2, "it did not stop at the first frame with content"
+
+
+def test_a_genuinely_dark_camera_still_returns_a_frame(probe):
+    """Bounded retries: a camera in the dark must not make the grab hang or raise."""
+
+    class _Frame:
+        def std(self):
+            return 0.0
+
+    class _Cap:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self):
+            self.reads += 1
+            return True, _Frame()
+
+    cap = _Cap()
+    ok, frame = cw._read_live_frame(cap, attempts=3, pause=0.0)
+
+    assert ok is True and frame is not None
+    assert cap.reads == 3, "the attempts budget was not honoured"
+
+
 def test_a_busy_camera_keeps_the_row_it_had_last_time(probe, enumerate_devices, monkeypatch):
     """A camera held by another app this round must not vanish from the picker."""
     import sys

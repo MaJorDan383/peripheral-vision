@@ -1554,6 +1554,35 @@ def _grab_camera_ffmpeg(index: int):
     return img
 
 
+def _frame_is_black(frame) -> bool:
+    """True for the all-black frame a DSHOW camera hands over right after a mode switch."""
+    try:
+        return float(frame.std()) < 1.0
+    except Exception:
+        return False
+
+
+def _read_live_frame(cap, attempts: int = 12, pause: float = 0.12):
+    """Read a frame that actually has something in it.
+
+    A DSHOW device delivers one pure-black frame when the capture mode changes. Measured on this
+    host: after ``_configure_camera_capture`` negotiated 2304x1536, frame 0 came back mean=0.0 and
+    frame 1 was the real image. Handing that first frame to the engine made the opening capture
+    black — and since two identical black frames compare as "unchanged", the watch then reported
+    nothing at every tick and its preview stayed black. Bounded: a camera that really is in the
+    dark still returns its frame rather than hanging.
+    """
+    ok, frame = False, None
+    tries = max(1, attempts)
+    for attempt in range(tries):
+        ok, frame = cap.read()
+        if ok and frame is not None and not _frame_is_black(frame):
+            return True, frame
+        if attempt < tries - 1:
+            time.sleep(pause)
+    return ok, frame
+
+
 def _grab_camera(source: dict[str, Any]):
     """Capture a frame from a camera (held open between frames)."""
     import cv2
@@ -1583,7 +1612,7 @@ def _grab_camera(source: dict[str, Any]):
             _CAM_HANDLE["cap"] = cap
             _CAM_HANDLE["index"] = index
 
-        ok, frame = cap.read()
+        ok, frame = _read_live_frame(cap)
         if not ok or frame is None:
             raise RuntimeError(f"Camera {index} returned empty frame")
 
