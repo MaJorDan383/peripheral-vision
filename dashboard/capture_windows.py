@@ -80,29 +80,17 @@ class _WINDOWPLACEMENT(ctypes.Structure):
 
 
 class _DWM_THUMBNAIL_PROPERTIES(ctypes.Structure):
+    # The real dwmapi.h layout: dwFlags, rcDestination, rcSource, opacity (BYTE), fVisible,
+    # fSourceClientAreaOnly. Note there is NO dwSize and NO fMask member — inventing them (and a
+    # double where the BYTE belongs) misaligns every later field, and dwmapi then reads a RECT out
+    # of whatever follows and faults with an access violation.
     _fields_ = [
-        ("dwSize", ctypes.c_uint),
-        ("fMask", ctypes.c_uint),
-        ("fOptions", ctypes.c_uint),
+        ("dwFlags", ctypes.c_uint),
         ("rctDestination", _RECT),
         ("rctSource", _RECT),
-        ("clrOpacity", ctypes.c_double),
+        ("opacity", ctypes.c_ubyte),
         ("fVisible", ctypes.c_int),
-    ]
-
-
-class _WNDCLASS(ctypes.Structure):
-    _fields_ = [
-        ("style", ctypes.c_uint),
-        ("lpfnWndProc", ctypes.c_void_p),
-        ("cbClsExtra", ctypes.c_long),
-        ("cbWndExtra", ctypes.c_long),
-        ("hInstance", ctypes.c_void_p),
-        ("hIcon", ctypes.c_void_p),
-        ("hCursor", ctypes.c_void_p),
-        ("hbrBackground", ctypes.c_void_p),
-        ("lpszMenuName", ctypes.c_wchar_p),
-        ("lpszClassName", ctypes.c_wchar_p),
+        ("fSourceClientAreaOnly", ctypes.c_int),
     ]
 
 
@@ -132,11 +120,9 @@ from shared_state import (
     THUMB_HOST,
     THUMB_LOCK,
     THUMB_MAX_EDGE,
-    THUMB_PROC,
 )
 
 _THUMB_HOST = THUMB_HOST
-_THUMB_PROC = THUMB_PROC
 _THUMB_LOCK = THUMB_LOCK
 _THUMB_EXECUTOR = THUMB_EXECUTOR
 _THUMB_MAX_EDGE = THUMB_MAX_EDGE
@@ -161,6 +147,10 @@ CAMERA_MODES: tuple[tuple[int, int], ...] = ((3840, 2160), (1920, 1080), (1280, 
 _CAMERA_MODES: dict[int, tuple[int, int]] = {}
 _CAMERA_MODES_LOADED = False
 _MODES_LOCK = threading.Lock()
+# Serializes the whole DWM-thumbnail capture (register → update → pump → print → unregister).
+# Every capture shares ONE host window, so two concurrent captures would each print whichever
+# thumbnail was registered last — which is how a row ends up showing another window's content.
+_DWM_LOCK = threading.Lock()
 
 _CAMERA_NAMES: Optional[list[str]] = None
 _CAMERA_DEVICES: Optional[list[dict[str, str]]] = None
@@ -174,7 +164,17 @@ _NAMES_LOCK = threading.Lock()
 # from the free ffmpeg enumeration, size from the remembered mode — and is opened only when it
 # is actually picked. `PV_CAMERA_PROBE_ALL=1` restores probing everything.
 CAMERA_PROBE_ALL = bool(os.environ.get("PV_CAMERA_PROBE_ALL"))
-_CAMERA_VIRTUAL_HINTS = ("virtual camera", "phone link", "cross device")
+_CAMERA_VIRTUAL_HINTS = (
+    "virtual camera", "phone link", "cross device", "nvidia broadcast",
+    "meta quest", "vseeface", "obs virtual", "virtual",
+)
+
+# The DirectShow *video input device category* CLSID. Every dshow video device ffmpeg
+# could not resolve to a PnP path reports this as its ``Alternative name`` — real USB
+# webcams included (the webcam on this host shows exactly this, like the headset feeds).
+# So ``@device_sw_`` + this CLSID says nothing about the device and must never, on its own,
+# mark a camera virtual: doing so hid the real webcam behind the show-virtual toggle.
+_DSHOW_VIDEO_CATEGORY = "{860bb310-5d01-11d0-bd3b-00a0c911ce86}"
 
 
 def _camera_mode(index: int) -> Optional[tuple[int, int]]:
@@ -354,8 +354,16 @@ def _camera_is_quiet(index: int) -> bool:
         return any(hint in name for hint in _CAMERA_VIRTUAL_HINTS)
     if "swd#" in moniker or "vcamdevapi" in moniker:
         return True  # software device API — however PnP-shaped the prefix looks
-    if moniker.startswith("@device_sw_") or moniker.startswith("@device_cm_"):
-        return True  # DirectShow software filter
+    if moniker.startswith("@device_cm_"):
+        return True  # DirectShow software filter (a COM software device)
+    if moniker.startswith("@device_sw_"):
+        # A software-device moniker. The bare video-category CLSID is what EVERY dshow
+        # device without a resolvable PnP path reports — real webcams included — so it is
+        # not a virtual signal; decide that case by name. An unnamed, unhinted device is
+        # unknown, and unknown is probed, never silently hidden.
+        if _DSHOW_VIDEO_CATEGORY in moniker:
+            return any(hint in name for hint in _CAMERA_VIRTUAL_HINTS)
+        return True
     if "usb#" in moniker:
         return False  # a USB function device: real hardware
     if moniker.startswith("@device_pnp_"):
@@ -389,6 +397,40 @@ def _quiet_camera_entry(index: int, previous: Optional[dict[str, Any]]) -> dict[
         if previous.get("readable"):
             entry["readable"] = True
         if not mode and previous.get("width") and previous.get("height"):
+            entry["width"], entry["height"] = previous["width"], previous["height"]
+    return entry
+
+
+def _unprobed_camera_entry(index: int, previous: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """The picker row for real hardware the probe could not open this round.
+
+    A build of OpenCV with no working camera backend (this host: headless 5.0.0, neither
+    DSHOW nor MSMF — ``VideoCapture(index, CAP_DSHOW)`` can never open a DSHOW device) makes
+    every hardware probe fail. Requiring a successful frame read then made a real webcam
+    indistinguishable from a disconnected one, so it was dropped from the list entirely.
+    Hardware that enumerates is listed; a device that could not be read is marked, not
+    hidden — absence from a cached list is not absence of hardware.
+    """
+    devices = _camera_devices()
+    name = devices[index]["name"] if index < len(devices) else ""
+    entry: dict[str, Any] = {
+        "id": f"camera-{index}",
+        "kind": "camera",
+        "index": index,
+        "label": name or f"Camera {index}",
+        "name": name,
+        "default": index == 0,
+        "badge": "default" if index == 0 else "camera",
+        "readable": False,
+    }
+    mode = _camera_mode(index)
+    if mode:
+        entry["width"], entry["height"] = mode
+    if previous:
+        if previous.get("readable") and previous.get("width") and previous.get("height"):
+            entry["readable"] = True
+            entry["width"], entry["height"] = previous["width"], previous["height"]
+        elif not mode and previous.get("width") and previous.get("height"):
             entry["width"], entry["height"] = previous["width"], previous["height"]
     return entry
 
@@ -527,11 +569,20 @@ def _probe_cameras(deadline_s: float) -> None:
                 break
             _probe_one_camera(index, names, out, deadline=time.time() + deadline_s)
         for index in probe_indices:
-            if index not in out and index in previous:
+            if index in out:
+                continue
+            prev = previous.get(index) or {}
+            if prev and not prev.get("quiet"):
                 # A camera busy elsewhere this round (held by OBS, deadline hit) keeps the row
                 # it had last time — a device the picker listed yesterday must not vanish
                 # today because one probe lost a race.
-                out[index] = previous[index]
+                out[index] = prev
+            else:
+                # The probe could not read it (no working OpenCV camera backend on this host,
+                # the device is held, or the deadline hit) and no usable cached row exists:
+                # list it from the free enumeration, marked unreadable — never drop real
+                # hardware from the picker just because a frame could not be read.
+                out[index] = _unprobed_camera_entry(index, prev)
         devices = [out[i] for i in sorted(out)]
         if devices:
             _CAMERA_CACHE["devices"] = devices
@@ -983,6 +1034,39 @@ def _dib_image(hdc: int, hbmp: int, width: int, height: int):
     return Image.fromarray(rgb, "RGB")
 
 
+class _CaptureBitmap:
+    """A GDI surface to render a window into, released on exit.
+
+    The bitmap is created compatible with the SCREEN DC on purpose. ``CreateCompatibleBitmap`` on
+    a memory DC inherits that DC's 1x1 MONOCHROME default, so the "32bpp" read-back is all black:
+    every window capture came back blank, the blank check sent it to the screen-grab fallback, and
+    every picker row then showed whichever window happened to be on top of that screen region.
+    """
+
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+        self.user32 = ctypes.windll.user32
+        self.gdi32 = ctypes.windll.gdi32
+        self.screen = self.user32.GetDC(0)
+        self.hdc = self.gdi32.CreateCompatibleDC(self.screen)
+        self.hbmp = self.gdi32.CreateCompatibleBitmap(self.screen, width, height)
+        self.gdi32.SelectObject(self.hdc, self.hbmp)
+
+    def image(self):
+        """The pixels rendered into this surface so far (BGR→RGB, PIL image)."""
+        return _dib_image(self.hdc, self.hbmp, self.width, self.height)
+
+    def __enter__(self) -> "_CaptureBitmap":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        self.gdi32.DeleteObject(self.hbmp)
+        self.gdi32.DeleteDC(self.hdc)
+        self.user32.ReleaseDC(0, self.screen)
+        return False
+
+
 def _grab_window_printwindow(source: dict[str, Any]):
     """Capture a window via PrintWindow (works for most non-minimized windows)."""
     hwnd = source.get("hwnd")
@@ -998,21 +1082,13 @@ def _grab_window_printwindow(source: dict[str, Any]):
         raise _SourceGone()
 
     user32 = ctypes.windll.user32
-    gdi32 = ctypes.windll.gdi32
 
-    hdc = gdi32.CreateCompatibleDC(0)
-    hbmp = gdi32.CreateCompatibleBitmap(hdc, width, height)
-    try:
-        # Select the bitmap into the DC so PrintWindow renders into it
-        gdi32.SelectObject(hdc, hbmp)
+    with _CaptureBitmap(width, height) as surface:
         # PrintWindow with PW_RENDERFULLCONTENT (0x2)
-        ok = user32.PrintWindow(ctypes.c_void_p(hwnd), hdc, 2)
+        ok = user32.PrintWindow(ctypes.c_void_p(hwnd), surface.hdc, 2)
         if not ok:
             raise RuntimeError("PrintWindow returned 0")
-        img = _dib_image(hdc, hbmp, width, height)
-    finally:
-        gdi32.DeleteObject(hbmp)
-        gdi32.DeleteDC(hdc)
+        img = surface.image()
 
     _GRAB_STATE.method = "printwindow"
     return img
@@ -1053,62 +1129,80 @@ def _pump(hwnd: int, seconds: float) -> None:
 
 
 def _thumb_host(width: int, height: int) -> int:
-    """Get or create the off-screen thumbnail host window. Returns its hwnd."""
-    global _THUMB_HOST, _THUMB_PROC
+    """Get or create the off-screen thumbnail host window. Returns its hwnd.
+
+    The host is a real window for DWM to compose a thumbnail into, and it must never be seen:
+    it lives off-screen, carries WS_EX_TOOLWINDOW (no taskbar or Alt-Tab entry) and has an EMPTY
+    title, which alone keeps it out of ``list_windows`` (that needs a title).
+
+    It uses the built-in ``Static`` class on purpose: no class registration to get wrong, no
+    ``WNDCLASS``/instance-handle mismatch, and no WNDPROC callback of ours that has to be kept
+    alive for the process lifetime (a collected one crashes message dispatch). DWM only needs a
+    shown top-level window to compose into.
+    """
+    global _THUMB_HOST
     with _THUMB_LOCK:
         hwnd = _THUMB_HOST.get("hwnd")
         if hwnd:
             return hwnd
 
         user32 = ctypes.windll.user32
-        gdi32 = ctypes.windll.gdi32
-
-        # Register a window class
-        WNDPROC = ctypes.WINFUNCTYPE(
-            ctypes.c_long, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_long
+        # Declared prototype: keeps the class/title strings wide and the HWND a real 64-bit handle.
+        create = user32.CreateWindowExW
+        create.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        create.restype = ctypes.c_void_p
+        hwnd = create(
+            0x80 | 0x08000000,  # WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+            "Static",  # a built-in class — nothing to register
+            "",  # lpWindowName: empty, so this window can never be listed as a source
+            0x80000000 | 0x10000000,  # WS_POPUP | WS_VISIBLE: DWM composes only into shown windows
+            -32000,
+            -32000,
+            width,
+            height,
+            None,
+            None,
+            None,
+            None,
         )
-
-        def _wnd_proc(_hwnd, msg, wparam, lparam):
-            if msg == 0x0010:  # WM_DESTROY
-                return 0
-            return user32.DefWindowProcW(_hwnd, msg, wparam, lparam)
-
-        wnd_proc = WNDPROC(_wnd_proc)
-        wc = _WNDCLASS()
-        wc.style = 0
-        wc.lpfnWndProc = ctypes.cast(wnd_proc, ctypes.c_void_p)
-        wc.cbClsExtra = 0
-        wc.cbWndExtra = 0
-        wc.hInstance = None
-        wc.hIcon = None
-        wc.hCursor = None
-        wc.hbrBackground = gdi32.GetStockObject(0)  # NULL_BRUSH
-        wc.lpszMenuName = None
-        wc.lpszClassName = "PVThumbHost"
-
-        atom = user32.RegisterClassW(ctypes.byref(wc))
-        if not atom:
-            raise RuntimeError("RegisterClass failed")
-
-        hwnd = int(user32.CreateWindowExW(
-            0x8000000 | 0x20,  # WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-            ctypes.cast(wnd_proc, ctypes.c_void_p),  # need a valid proc
-            "PVThumbHost",
-            0x16,  # WS_OVERLAPPEDWINDOW
-            -32000, -32000, width, height,
-            None, None, None, None,
-        ))
         if not hwnd:
-            raise RuntimeError("CreateWindowEx failed")
+            raise RuntimeError(
+                f"CreateWindowEx failed (error {ctypes.windll.kernel32.GetLastError()})"
+            )
+        user32.ShowWindow(ctypes.c_void_p(hwnd), 8)  # SW_SHOWNA — shown off-screen, never activated
+        # Mutate the shared dict: rebinding the module name would leave shared_state (and
+        # list_windows' host exclusion) pointing at the old, empty copy.
+        _THUMB_HOST["hwnd"] = int(hwnd)
+        _THUMB_HOST["size"] = (width, height)
+        return int(hwnd)
 
-        _THUMB_HOST = {"hwnd": hwnd}
-        return hwnd
 
 
+
+TNP_RECTDESTINATION = 0x1
+TNP_VISIBLE = 0x8
 
 
 def _grab_window_thumbnail(source: dict[str, Any]):
-    """Capture a window via DWM thumbnail API (works for minimized windows)."""
+    """Capture a window through the DWM thumbnail API.
+
+    This is the occlusion-independent path — DWM composes the window's OWN content, so it works
+    for a minimized window (its last frame) and for a window that other windows cover, where a
+    screen grab would return whatever is on top of it.
+    """
     hwnd = source.get("hwnd")
     if not hwnd:
         raise RuntimeError("No hwnd in source")
@@ -1118,66 +1212,84 @@ def _grab_window_thumbnail(source: dict[str, Any]):
     if not user32.IsWindow(ctypes.c_void_p(hwnd)):
         raise _SourceGone()
 
-    # Get the window's size (use restored rect for minimized)
-    rect = _window_rect(hwnd)
+    # Minimized windows have an iconic (tiny, off-screen) rect — thumbnail what they restore to.
+    rect = _restored_rect(hwnd) if user32.IsIconic(ctypes.c_void_p(hwnd)) else _window_rect(hwnd)
+    if not rect:
+        rect = _window_rect(hwnd) or _restored_rect(hwnd)
     if not rect:
         raise _SourceGone()
     left, top, right, bottom = rect
     width, height = right - left, bottom - top
     if width <= 0 or height <= 0:
-        # Minimized: use restored rect
-        rect = _restored_rect(hwnd)
-        if not rect:
-            raise _SourceMinimized()
-        left, top, right, bottom = rect
-        width, height = right - left, bottom - top
+        raise _SourceMinimized()
 
     # Scale down for thumbnail
     scale = min(1.0, _THUMB_MAX_EDGE / max(width, height))
     thumb_w = max(1, int(width * scale))
     thumb_h = max(1, int(height * scale))
 
-    # Create the off-screen host window
-    host_hwnd = _thumb_host(thumb_w, thumb_h)
+    # One host window is shared by every capture, so the whole register → update → print →
+    # unregister sequence is serialized: otherwise two rows capture whichever thumbnail was
+    # registered last, and both show the same window.
+    with _DWM_LOCK:
+        host_hwnd = _thumb_host(thumb_w, thumb_h)
+        # The host is created once; every later capture may want a different size.
+        user32.MoveWindow(ctypes.c_void_p(host_hwnd), -32000, -32000, thumb_w, thumb_h, 0)
 
-    # Create a DWM thumbnail
-    dwmapi = ctypes.windll.dwmapi
-    thumb_id = ctypes.c_uint(0)
-    r = dwmapi.DwmRegisterThumbnail(ctypes.c_void_p(host_hwnd), ctypes.c_void_p(hwnd), ctypes.byref(thumb_id))
-    if r != 0:
-        raise RuntimeError(f"DwmRegisterThumbnail failed: {r}")
+        dwmapi = ctypes.windll.dwmapi
+        # Signatures matter here: these calls take the THUMBNAIL handle DWM hands back, never the
+        # source window handle. Passing a window handle as the properties pointer makes dwmapi
+        # dereference it as memory (access violation reading 0x…<hwnd>), which is what this path
+        # used to do.
+        dwmapi.DwmRegisterThumbnail.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        dwmapi.DwmRegisterThumbnail.restype = ctypes.c_long
+        dwmapi.DwmUpdateThumbnailProperties.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_DWM_THUMBNAIL_PROPERTIES),
+        ]
+        dwmapi.DwmUpdateThumbnailProperties.restype = ctypes.c_long
+        dwmapi.DwmUnregisterThumbnail.argtypes = [ctypes.c_void_p]
+        dwmapi.DwmUnregisterThumbnail.restype = ctypes.c_long
 
-    try:
-        # Set thumbnail properties (size to fill the host)
-        props = _DWM_THUMBNAIL_PROPERTIES()
-        props.dwSize = ctypes.sizeof(_DWM_THUMBNAIL_PROPERTIES)
-        props.fMask = 0x1 | 0x2 | 0x4 | 0x8  # destination, source, opacity, visible
-        props.rctDestination.left = 0
-        props.rctDestination.top = 0
-        props.rctDestination.right = thumb_w
-        props.rctDestination.bottom = thumb_h
-        props.fVisible = 1
-        dwmapi.DwmUpdateThumbnail(ctypes.c_void_p(host_hwnd), ctypes.c_void_p(hwnd), ctypes.byref(props))
+        thumb = ctypes.c_void_p(0)
+        r = dwmapi.DwmRegisterThumbnail(
+            ctypes.c_void_p(host_hwnd), ctypes.c_void_p(hwnd), ctypes.byref(thumb)
+        )
+        if r != 0:
+            raise RuntimeError(f"DwmRegisterThumbnail failed: {r}")
 
-        # Pump messages briefly to let DWM render
-        _pump(host_hwnd, 0.5)
-
-        # Capture the host window via PrintWindow
-        gdi32 = ctypes.windll.gdi32
-        hdc = gdi32.CreateCompatibleDC(0)
-        hbmp = gdi32.CreateCompatibleBitmap(hdc, thumb_w, thumb_h)
         try:
-            gdi32.SelectObject(hdc, hbmp)
-            user32.PrintWindow(ctypes.c_void_p(host_hwnd), hdc, 2)
-            img = _dib_image(hdc, hbmp, thumb_w, thumb_h)
-        finally:
-            gdi32.DeleteObject(hbmp)
-            gdi32.DeleteDC(hdc)
+            props = _DWM_THUMBNAIL_PROPERTIES()
+            # DESTINATION | VISIBLE only. Setting RECTSOURCE with a zeroed rect asks DWM to draw
+            # an empty area and a zero OPACITY renders the thumbnail invisible — the previous mask
+            # set both, so nothing could ever appear. Leaving them out means "whole window, opaque".
+            props.dwFlags = TNP_RECTDESTINATION | TNP_VISIBLE
+            props.rctDestination.left = 0
+            props.rctDestination.top = 0
+            props.rctDestination.right = thumb_w
+            props.rctDestination.bottom = thumb_h
+            props.fVisible = 1
+            # DwmUpdateThumbnailProperties(thumbnail, props) — the name matters: there is no
+            # "DwmUpdateThumbnail" export, and a missing one means the properties are silently
+            # never applied.
+            dwmapi.DwmUpdateThumbnailProperties(thumb, ctypes.byref(props))
 
-        _GRAB_STATE.method = "thumbnail"
-        return img
-    finally:
-        dwmapi.DwmUnregisterThumbnail(ctypes.c_void_p(host_hwnd), ctypes.c_void_p(hwnd))
+            # Pump messages briefly to let DWM render
+            _pump(host_hwnd, 0.5)
+
+            # Capture the host window via PrintWindow
+            with _CaptureBitmap(thumb_w, thumb_h) as surface:
+                user32.PrintWindow(ctypes.c_void_p(host_hwnd), surface.hdc, 2)
+                img = surface.image()
+
+            _GRAB_STATE.method = "thumbnail"
+            return img
+        finally:
+            dwmapi.DwmUnregisterThumbnail(thumb)
 
 
 def _thumb_capture(source: dict[str, Any]):
@@ -1186,6 +1298,27 @@ def _thumb_capture(source: dict[str, Any]):
 
 
 # ── Window grab (dispatches to printwindow or thumbnail) ───────────────────
+
+def _window_is_on_top(hwnd: int) -> bool:
+    """True when the window itself owns its centre point — nothing else covers it there.
+
+    A screen grab only tells the truth about a window that is actually on top; otherwise it
+    returns whatever covers it.
+    """
+    rect = _window_rect(hwnd)
+    if not rect:
+        return False
+    left, top, right, bottom = rect
+    user32 = ctypes.windll.user32
+    user32.WindowFromPoint.argtypes = [_POINT]
+    user32.WindowFromPoint.restype = ctypes.c_void_p
+    user32.GetAncestor.restype = ctypes.c_void_p
+    at_point = user32.WindowFromPoint(_POINT((left + right) // 2, (top + bottom) // 2))
+    if not at_point:
+        return False
+    root = user32.GetAncestor(ctypes.c_void_p(at_point), 2)  # GA_ROOT
+    return int(root or 0) == int(hwnd)
+
 
 def _grab_window(source: dict[str, Any]):
     """Capture a window, choosing the best method available."""
@@ -1199,9 +1332,12 @@ def _grab_window(source: dict[str, Any]):
 
     minimized = bool(user32.IsIconic(ctypes.c_void_p(hwnd)))
     if minimized:
+        # A minimized window has no pixels of its own on screen; DWM keeps its last frame and
+        # composites it into the thumbnail host.
         return _grab_window_thumbnail(source)
 
-    # Try PrintWindow first
+    # 1. PrintWindow — the window's own pixels. It prints pure black for plenty of real apps
+    #    (Chromium/Electron/Qt here), which is why a blank result moves on rather than failing.
     try:
         img = _grab_window_printwindow(source)
         if not _is_blank(img):
@@ -1209,14 +1345,28 @@ def _grab_window(source: dict[str, Any]):
     except Exception:
         pass
 
-    # Fallback: screen-region capture
-    rect = _window_rect(hwnd)
-    if rect:
-        left, top, right, bottom = rect
-        from PIL import ImageGrab
-        img = ImageGrab.grab(bbox=(left, top, right, bottom))
-        _GRAB_STATE.method = "screen"
-        return img
+    # 2. DWM thumbnail — occlusion-independent: this returns THIS window's content even while
+    #    other windows cover it.
+    try:
+        img = _grab_window_thumbnail(source)
+        if not _is_blank(img):
+            return img
+    except Exception:
+        pass
+
+    # 3. Screen grab, only when the window really is on top of its own centre. Grabbing a rect
+    #    that something else covers returns that other window — the bug where every picker row
+    #    showed the currently focused app.
+    if _window_is_on_top(hwnd):
+        rect = _window_rect(hwnd)
+        if rect:
+            left, top, right, bottom = rect
+            from PIL import ImageGrab
+
+            img = ImageGrab.grab(bbox=(left, top, right, bottom))
+            if not _is_blank(img):
+                _GRAB_STATE.method = "screen"
+                return img
 
     raise RuntimeError(f"Cannot capture window {hwnd}")
 
@@ -1238,6 +1388,63 @@ def _grab(source: dict[str, Any]):
 
 # ── Camera grab ─────────────────────────────────────────────────────────────
 
+def _camera_open_failure(index: int, detail: str = "") -> str:
+    """A camera-open failure that names the real cause instead of a phantom lock."""
+    name = ""
+    names = _camera_device_names()
+    if 0 <= index < len(names):
+        name = names[index]
+    where = f"Camera {index}" + (f" ({name})" if name else "")
+    tail = f" — {detail}" if detail else ""
+    return f"Cannot open {where}{tail}"
+
+
+def _grab_camera_ffmpeg(index: int):
+    """One frame from a camera via ffmpeg's dshow input.
+
+    Enumeration is already free with ffmpeg; reading a frame is a short-lived process. This
+    exists for a build of OpenCV with no usable camera backend (this host: headless 5.0.0,
+    neither DSHOW nor MSMF), where ``cv2.VideoCapture(index, CAP_DSHOW)`` can never open a
+    real device while ffmpeg opens the very same dshow device without trouble.
+    """
+    import io
+    import shutil
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError(
+            _camera_open_failure(index, "OpenCV has no camera backend here and ffmpeg is not on PATH")
+        )
+    names = _camera_device_names()
+    name = names[index] if 0 <= index < len(names) else ""
+    if not name:
+        raise RuntimeError(_camera_open_failure(index, "no such device is enumerated"))
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "dshow", "-i", f"video={name}",
+             "-frames:v", "1", "-f", "image2", "-vcodec", "mjpeg", "pipe:1"],
+            capture_output=True, timeout=25,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(_camera_open_failure(index, "it did not deliver a frame in time"))
+    data = proc.stdout or b""
+    if not data:
+        lines = [ln for ln in (proc.stderr or b"").decode("utf-8", "replace").splitlines() if ln.strip()]
+        reason = lines[-1] if lines else "no frame was delivered"
+        # A real DSHOW lock (another app holds the device) is the common cause here; naming
+        # it is honest, and ffmpeg's own line says which.
+        raise RuntimeError(_camera_open_failure(index, reason))
+    from PIL import Image
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    try:
+        _remember_camera_mode(index, (img.width, img.height))
+    except Exception:
+        pass
+    _GRAB_STATE.method = "camera"
+    return img
+
+
 def _grab_camera(source: dict[str, Any]):
     """Capture a frame from a camera (held open between frames)."""
     import cv2
@@ -1254,14 +1461,15 @@ def _grab_camera(source: dict[str, Any]):
                     pass
             cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
             if not cap.isOpened():
-                # "Cannot open camera 0" on its own sends the user hunting for a plugin bug that
-                # is not there: a DSHOW open failure is nearly always another application holding
-                # the device (a call, a virtual-camera app, or a stale handle from an earlier
-                # session). Name the likely cause.
-                raise RuntimeError(
-                    f"Cannot open camera {index} — another application may be holding the device; "
-                    "close anything using it and refresh"
-                )
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                # Do not blame a phantom lock first: this build of OpenCV may have no usable
+                # camera backend at all (this host: headless 5.0.0, neither DSHOW nor MSMF),
+                # in which case a DSHOW open always fails while ffmpeg reads the very same
+                # dshow device. Try that before reporting an open failure.
+                return _grab_camera_ffmpeg(index)
             _configure_camera_capture(cap, index)
             _CAM_HANDLE["cap"] = cap
             _CAM_HANDLE["index"] = index
