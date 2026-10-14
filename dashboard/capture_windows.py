@@ -180,6 +180,10 @@ _DSHOW_VIDEO_CATEGORY = "{860bb310-5d01-11d0-bd3b-00a0c911ce86}"
 # probe asks for it once, not once per device.
 _PNP_NAMES_TTL_S = 60.0
 _PNP_NAMES_CACHE: dict[str, Any] = {"at": 0.0, "names": None}
+# Verdicts per device name, inside the same window as the name set. Without this the shell-out
+# (measured: 3.68 s cold for 241 names) was paid again on every call — and one caller is the
+# /preview guard, i.e. a request path.
+_PNP_VERDICT_CACHE: dict[str, bool] = {}
 _PNP_LOCK = threading.Lock()
 
 
@@ -216,6 +220,8 @@ def _windows_device_names() -> Optional[set[str]]:
             names = None
         _PNP_NAMES_CACHE["names"] = names
         _PNP_NAMES_CACHE["at"] = time.time()
+        # A fresh name set invalidates the verdicts derived from the old one.
+        _PNP_VERDICT_CACHE.clear()
         return names
 
 
@@ -226,12 +232,23 @@ def _windows_knows_device(name: str) -> bool:
     still listed by `Get-PnpDevice`, present=False) — whereas a name nothing in Windows knows is a
     filter some application installed. That is the only way to tell them apart: the moniker shape
     is identical for both (this host's real webcam reported the bare video-category CLSID too).
+
+    The answer is memoised for the life of the name set: the query behind it is a PowerShell
+    shell-out, and `/preview` consults this per camera row.
     """
+    wanted = (name or "").strip().lower()
+    if not wanted:
+        return True
+    with _PNP_LOCK:
+        if wanted in _PNP_VERDICT_CACHE:
+            return _PNP_VERDICT_CACHE[wanted]
     names = _windows_device_names()
     if names is None:
         return True  # unknown → do not hide a camera over a failed query
-    wanted = (name or "").strip().lower()
-    return bool(wanted) and any(wanted in known or known == wanted for known in names)
+    verdict = any(wanted in known or known == wanted for known in names)
+    with _PNP_LOCK:
+        _PNP_VERDICT_CACHE[wanted] = verdict
+    return verdict
 
 
 def _size_with_remembered_mode(index: int, width: int, height: int) -> tuple[int, int]:
@@ -1275,11 +1292,15 @@ def _thumb_host(width: int, height: int) -> int:
     """
     global _THUMB_HOST
     with _THUMB_LOCK:
+        user32 = ctypes.windll.user32
         hwnd = _THUMB_HOST.get("hwnd")
         if hwnd:
-            return hwnd
+            if user32.IsWindow(ctypes.c_void_p(int(hwnd))):
+                return hwnd
+            # The host went away (a crashed thread, a session change) — keep the stale handle and
+            # every later thumbnail fails forever, so drop it and build a fresh one.
+            _THUMB_HOST["hwnd"] = 0
 
-        user32 = ctypes.windll.user32
         # Declared prototype: keeps the class/title strings wide and the HWND a real 64-bit handle.
         create = user32.CreateWindowExW
         create.argtypes = [

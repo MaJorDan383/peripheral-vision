@@ -162,6 +162,57 @@ def test_the_dwm_properties_match_the_win32_layout():
     assert cw.TNP_RECTDESTINATION == 0x1 and cw.TNP_VISIBLE == 0x8
 
 
+def test_a_lost_thumbnail_host_is_rebuilt(monkeypatch):
+    """A cached host handle outlives its window (a crashed thread, a session change).
+
+    Keeping the stale handle would make every later minimized-window thumbnail fail for the life
+    of the process, so the host is validated and replaced.
+    """
+    from types import SimpleNamespace
+
+    created: list[tuple] = []
+    user32 = SimpleNamespace(
+        IsWindow=lambda hwnd: False,  # the cached window is gone
+        CreateWindowExW=lambda *args: (created.append(args), 4242)[1],
+        ShowWindow=lambda hwnd, cmd: 1,
+    )
+    monkeypatch.setattr(
+        ctypes,
+        "windll",
+        SimpleNamespace(user32=user32, gdi32=SimpleNamespace(), kernel32=SimpleNamespace(GetLastError=lambda: 0)),
+        raising=False,
+    )
+    monkeypatch.setattr(cw, "_THUMB_HOST", {"hwnd": 999, "size": (0, 0)})
+
+    hwnd = cw._thumb_host(320, 180)
+
+    assert hwnd == 4242, "the stale host handle was reused"
+    assert created, "no replacement window was created"
+    assert cw._THUMB_HOST["hwnd"] == 4242
+
+
+def test_a_live_thumbnail_host_is_reused(monkeypatch):
+    """The normal path must not rebuild the host on every capture."""
+    from types import SimpleNamespace
+
+    created: list[tuple] = []
+    user32 = SimpleNamespace(
+        IsWindow=lambda hwnd: True,
+        CreateWindowExW=lambda *args: (created.append(args), 4242)[1],
+        ShowWindow=lambda hwnd, cmd: 1,
+    )
+    monkeypatch.setattr(
+        ctypes,
+        "windll",
+        SimpleNamespace(user32=user32, gdi32=SimpleNamespace(), kernel32=SimpleNamespace(GetLastError=lambda: 0)),
+        raising=False,
+    )
+    monkeypatch.setattr(cw, "_THUMB_HOST", {"hwnd": 999, "size": (0, 0)})
+
+    assert cw._thumb_host(320, 180) == 999
+    assert created == [], "a live host must be reused"
+
+
 def test_the_capture_surface_is_compatible_with_the_screen(monkeypatch):
     """The root cause of every black window frame: a memory DC's bitmap is 1bpp monochrome."""
     screen, memory_dc = object(), object()

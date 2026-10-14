@@ -84,10 +84,13 @@ def probe(tmp_path, monkeypatch) -> list[int]:
     monkeypatch.setattr(cw, "_CAMERA_DEVICES", None)
     monkeypatch.setattr(cw, "_CAMERA_CACHE", {"devices": [], "at": 0.0, "probing": True, "thread": None})
     monkeypatch.setattr(cw, "_CAM_HANDLE", {"cap": None, "index": -1})
-    # Windows' device list is a host fact — the probe must not shell out from a test. The default
-    # says "no device by that name", i.e. the ambiguous-filter case; tests that need a known
-    # device override it.
-    monkeypatch.setattr(cw, "_windows_knows_device", lambda name: False)
+    # Windows' device list is a host fact, and asking for it is a PowerShell shell-out (3.7 s
+    # cold). Stub the QUERY, never the classification built on it: the fixture says "no device by
+    # that name" — the ambiguous-filter case — and tests that need a known device override this.
+    monkeypatch.setattr(cw, "_windows_device_names", lambda: set())
+    # Module-level caches: a name set or verdict left over from another test would shadow the stub.
+    monkeypatch.setattr(cw, "_PNP_NAMES_CACHE", {"at": 0.0, "names": None})
+    monkeypatch.setattr(cw, "_PNP_VERDICT_CACHE", {})
     return opened
 
 
@@ -183,6 +186,40 @@ def test_without_a_remembered_mode_the_measured_size_stands(probe, enumerate_dev
     assert (row["width"], row["height"]) == (640, 480)
 
 
+def test_the_windows_device_query_is_memoised_per_name(probe, monkeypatch):
+    """The lookup behind the CLSID tiebreaker is a PowerShell shell-out — 3.7 s cold, measured.
+
+    `/preview` consults it per camera row, so a repeat must not pay for it again while the name
+    set stands.
+    """
+    calls: list[str] = []
+
+    def fake_names():
+        calls.append("query")
+        return {"hd pro webcam c920"}
+
+    monkeypatch.setattr(cw, "_windows_device_names", fake_names)
+    cw._PNP_VERDICT_CACHE.clear()
+
+    assert cw._windows_knows_device("HD Pro Webcam C920") is True
+    assert cw._windows_knows_device("HD Pro Webcam C920") is True
+    assert calls == ["query"], "the same device asked twice must not re-query Windows"
+
+    assert cw._windows_knows_device("HD Webcam T750") is False
+    assert calls == ["query", "query"], "a different device still needs its own answer"
+
+    cw._PNP_VERDICT_CACHE.clear()
+    assert cw._windows_knows_device("HD Pro Webcam C920") is True
+    assert len(calls) == 3, "a cleared cache must re-query"
+
+
+def test_an_unknown_answer_never_hides_a_camera(probe, monkeypatch):
+    """A failed query resolves toward showing the camera — hiding a real one is the worse mistake."""
+    monkeypatch.setattr(cw, "_windows_device_names", lambda: None)
+    cw._PNP_VERDICT_CACHE.clear()
+    assert cw._windows_knows_device("Some Camera") is True
+
+
 def test_a_software_filter_that_will_not_open_is_hidden_not_listed(probe, enumerate_devices, monkeypatch):
     """A software-shaped device the probe cannot read is a stale filter, not a pickable camera.
 
@@ -220,7 +257,7 @@ def test_a_device_windows_knows_is_still_a_camera(probe, enumerate_devices, monk
     A real webcam reports it (this host's C920 did) and so can a filter an application installed;
     a name Windows has a device for is real hardware and must be probed and listed.
     """
-    monkeypatch.setattr(cw, "_windows_knows_device", lambda name: True)
+    monkeypatch.setattr(cw, "_windows_device_names", lambda: {"hd pro webcam c920"})
     enumerate_devices(
         {"name": "HD Pro Webcam C920", "moniker": "@device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}#{A3FCE0F5}"}
     )
