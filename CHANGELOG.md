@@ -11,8 +11,38 @@ All notable changes to this plugin. Nothing before the first public release was 
   still outrank these, so the new values only decide what a fresh install — or a cleared state
   directory — starts from. `on_mention` keeps a watching plugin off turns that never asked for
   eyes, and a 5 s blink rate checks a screen 12 times a minute instead of 30.
+- **Virtual cameras are hidden by default.** The camera list shows real hardware; software devices
+  (a phone's virtual camera, headset feeds, broadcast filters) wait behind a **Show virtual
+  cameras** tick, because listing them buried the one real webcam. The toggle costs no device —
+  those rows come from the free enumeration — and a picked virtual camera opens as before.
 
 ### Fixed
+- **Window previews and window watches captured the wrong pixels.** PrintWindow rendered black
+  because its target bitmap came from a memory DC, which inherits that DC's 1×1 monochrome
+  default. The blank frame then fell through to a *screen grab* of the window's rect — which
+  returns whatever covers it, so on a desktop of maximized windows every row showed the same
+  focused app. Captures render into a screen-compatible surface now, and the ladder is
+  PrintWindow → DWM thumbnail (the window's own content, occlusion-independent) → a screen grab
+  only when the window really owns its own centre point.
+- **A camera's first frame after a mode switch is black, and it was handed to the watch.**
+  Negotiating a mode costs seconds and the next read comes back `mean=0.00` (measured: 2304×1536
+  on the C920 here). That made the opening capture black, and because two identical frames compare
+  as "unchanged", every later tick counted as skipped and the preview stayed black. The grab now
+  reads past a black frame, bounded, so a camera in a dark room still returns its frame.
+- **A software filter could pass itself off as a camera.** "HD Webcam T750" — no such device in
+  Windows at all — returns synthetic frames and was listed as a pickable camera. A software-shaped
+  device that will not open is answered from the enumeration and lives behind the virtual toggle;
+  where the moniker is the bare video-category CLSID (which real webcams report too), Windows' own
+  device list decides.
+- **Remembered camera state was keyed by list position.** A DirectShow index shifts whenever any
+  camera appears or disappears — a phone's virtual camera comes and goes — so one camera's size
+  and "readable" claim were handed to whichever device landed on that index. State follows the
+  device now.
+- **A camera row stated the driver's default rather than what a watch delivers.** The picker read
+  640×480 while a watch on the same camera was capturing 2304×1536.
+- **The watched image ignored the Blink rate and the source switch.** The pane refreshed on a
+  hard-coded 6 s clock, so a 5 s pick still stepped at 6 s, and its query key was source-agnostic,
+  so switching source showed the previous frame until the next tick.
 - **Polling cameras no longer pops Phone Link's window.** Listing devices is free — ffmpeg
   prints every camera name without touching a stream — but *opening* one is not: opening
   `J's S23 Ultra (Windows Virtual Camera)` starts `CrossDeviceStreamingHost.exe` and puts the

@@ -11,8 +11,8 @@ Peripheral Vision is a plugin for [Hermes](https://hermes-agent.nousresearch.com
 ## Features
 
 - **Display capture** — grabs whole displays: a GDI screen grab on Windows, `import`/`grim` or the desktop portal on Linux
-- **Window capture** — captures a single application window (PrintWindow on Windows, or a DWM thumbnail while it is minimized)
-- **Camera capture** — enumerates cameras and grabs frames (DirectShow on Windows, V4L2 on Linux)
+- **Window capture** — captures a single application window's *own* pixels: PrintWindow, falling back to a DWM thumbnail (the same path that serves a minimized window's last frame), and only screen-grabbing a window that is actually on top of its own area
+- **Camera capture** — enumerates cameras and grabs frames (DirectShow on Windows, V4L2 on Linux); a camera's row states the mode a watch negotiates — the largest its driver offers — which is the size its frames come back at
 - **Vision routing** — sends frames to your auxiliary vision model when one is picked in
   Hermes' own settings, otherwise to the model the live session is running
 - **Pre-LLM context injection** — adds live descriptions to a turn through the `pre_llm_call` hook, gated by the inject mode (picked in the pane, or `PV_VISION_INJECT_MODE`) so a screen that has not moved does not pay for itself on every turn
@@ -189,7 +189,7 @@ the Hermes backend (the desktop app inherits your user environment):
 | `PV_CAMERA_MAX_INDEX` | `4` | Probe floor — the probe covers every enumerated camera, never fewer than this |
 | `PV_CAMERA_CACHE_S` | `600` | Seconds the enumerated camera list stays cached |
 | `PV_CAMERA_PROBE_TIMEOUT_S` | `5.0` | Timeout (seconds) for detecting one camera |
-| `PV_CAMERA_PROBE_ALL` | _(unset)_ | Set to `1` to probe every camera again. Probes skip virtual cameras — opening Phone Link's virtual camera pops its stream window — so those rows carry their remembered size until picked |
+| `PV_CAMERA_PROBE_ALL` | _(unset)_ | Set to `1` to probe every camera again. Probes skip virtual cameras — opening Phone Link's virtual camera pops its stream window — so those rows carry their remembered size until picked, and the picker lists them only when **Show virtual cameras** is ticked |
 
 Choosing the vision model is **not** an environment variable. Frames go to whatever can read them,
 in this order: the `auxiliary.vision` model picked in Hermes' own settings (Settings → Models) —
@@ -207,7 +207,7 @@ choose a display, window, or camera in the desktop pane. The pane shows:
 
 1. **Monitor picker** — click a monitor to preview its frame
 2. **Window picker** — select an application window to capture
-3. **Camera picker** — switch between connected cameras
+3. **Camera picker** — switch between connected cameras; software cameras (a phone's virtual camera, headset feeds, broadcast filters) stay hidden behind a **Show virtual cameras** tick in that list
 4. **Vision candidates** — model suggestions based on intake size
 5. **Pin button** — lock a specific vision model for the session
 6. **Inject picker** ("Rides your turns") — when fresh readings are shared; see [Injection modes](#injection-modes)

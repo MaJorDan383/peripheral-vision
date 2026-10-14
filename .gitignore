@@ -13,5 +13,8 @@ log.jsonl
 vision_model.json
 cameras.json
 camera_modes.json
+inject_mode
+interval
+snaps/
 stop_request
 *.tmp
