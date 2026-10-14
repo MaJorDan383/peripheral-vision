@@ -131,6 +131,58 @@ def test_a_quiet_row_carries_the_remembered_size(probe, enumerate_devices):
     assert (entry["width"], entry["height"]) == (1280, 720), "the mode it settled on last time"
 
 
+def test_a_busy_camera_row_states_the_negotiated_mode(probe, enumerate_devices, monkeypatch):
+    """A row carried forward because the camera was busy must not keep the driver's default size.
+
+    This is the reported case: the watch holds the camera, so the probe cannot open it and the row
+    is carried from cache — 640x480 — while the watch is capturing 2304x1536.
+    """
+    import sys
+
+    enumerate_devices(HARDWARE)
+    cw._CAMERA_MODES[0] = (2304, 1536)
+    cw._CAMERA_CACHE["devices"] = [
+        {
+            "id": "camera-0",
+            "kind": "camera",
+            "index": 0,
+            "label": "HD Pro Webcam C920",
+            "name": "HD Pro Webcam C920",
+            "width": 640,
+            "height": 480,
+            "readable": True,
+        }
+    ]
+    monkeypatch.setitem(sys.modules, "cv2", _fake_cv2(probe, failing={0}))
+    cw._probe_cameras(5.0)
+
+    row = _entries()[0]
+    assert (row["width"], row["height"]) == (2304, 1536), f"the carried row said {row['width']}x{row['height']}"
+
+
+def test_a_probed_camera_reports_the_mode_a_watch_will_use(probe, enumerate_devices):
+    """The probe's open sees the driver default; a watch negotiates and remembers a bigger mode.
+
+    The row is what the user reads before picking, so it must describe what watching delivers —
+    the C920 reported 640x480 in the picker while its watch captured 2304x1536.
+    """
+    enumerate_devices(HARDWARE)
+    cw._CAMERA_MODES[0] = (2304, 1536)
+    cw._probe_cameras(5.0)
+
+    row = _entries()[0]
+    assert (row["width"], row["height"]) == (2304, 1536), f"row said {row['width']}x{row['height']}"
+
+
+def test_without_a_remembered_mode_the_measured_size_stands(probe, enumerate_devices):
+    """Nothing negotiated yet → the size the probe actually measured is still the honest answer."""
+    enumerate_devices(HARDWARE)
+    cw._probe_cameras(5.0)
+
+    row = _entries()[0]
+    assert (row["width"], row["height"]) == (640, 480)
+
+
 def test_a_software_filter_that_will_not_open_is_hidden_not_listed(probe, enumerate_devices, monkeypatch):
     """A software-shaped device the probe cannot read is a stale filter, not a pickable camera.
 

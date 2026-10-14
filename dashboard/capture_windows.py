@@ -234,6 +234,20 @@ def _windows_knows_device(name: str) -> bool:
     return bool(wanted) and any(wanted in known or known == wanted for known in names)
 
 
+def _size_with_remembered_mode(index: int, width: int, height: int) -> tuple[int, int]:
+    """The size to publish for a camera: the mode a watch negotiated, when it is bigger.
+
+    A probe opens a camera at whatever mode the driver defaults to — the C920 here reports
+    640x480 — while a watch negotiates and remembers a bigger one. The row is what the user reads
+    before picking, so what a watch actually delivers wins. Cheap, and it keeps a camera that the
+    probe could not open (held by the watch, or by another app) from advertising a stale size.
+    """
+    mode = _camera_mode(index)
+    if mode and (mode[0] > width or mode[1] > height):
+        return int(mode[0]), int(mode[1])
+    return width, height
+
+
 def _camera_mode(index: int) -> Optional[tuple[int, int]]:
     """The mode this camera settled on last time, if it is known."""
     global _CAMERA_MODES_LOADED
@@ -567,6 +581,10 @@ def _probe_one_camera(index: int, names: list[str], out: dict[int, dict[str, Any
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
                 if not width and frame is not None:
                     height, width = frame.shape[:2]
+                # A probe opens a camera at whatever mode the driver defaults to — the C920 here
+                # reports 640x480 — while a watch negotiates and remembers a bigger one. The row
+                # is what the user reads before picking, so it describes what a watch delivers.
+                width, height = _size_with_remembered_mode(index, width, height)
                 name = names[index] if index < len(names) else ""
                 entry = {
                     "id": f"camera-{index}",
@@ -676,10 +694,16 @@ def _probe_cameras(deadline_s: float) -> None:
                 continue
             prev = remembered(index)
             if prev and not prev.get("quiet"):
-                # A camera busy elsewhere this round (held by OBS, deadline hit) keeps the row
-                # it had last time — a device the picker listed yesterday must not vanish
-                # today because one probe lost a race.
-                out[index] = prev
+                # A camera busy elsewhere this round (held by the watch, by OBS, deadline hit) keeps
+                # the row it had last time — a device the picker listed yesterday must not vanish
+                # today because one probe lost a race. Its size is refreshed from the remembered
+                # mode, so a row written before a watch negotiated one cannot go on advertising the
+                # driver's default (the C920's 640x480).
+                carried = dict(prev)
+                carried["width"], carried["height"] = _size_with_remembered_mode(
+                    index, int(carried.get("width") or 0), int(carried.get("height") or 0)
+                )
+                out[index] = carried
             elif _camera_is_software_shaped(index):
                 # A software-shaped device that will not open is a stale or virtual filter, not a
                 # camera anybody can pick: this host advertises "HD Webcam T750", which has no
