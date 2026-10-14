@@ -378,6 +378,16 @@ function SnapMenu({ ctx, sources, kind, disabled, onPick }) {
   })
 }
 
+// How often the pane re-reads the watched image. It mirrors the Blink-rate setting rather than a
+// fixed clock: a hard-coded interval meant a 5s pick still refreshed on its own 6s rhythm, and
+// manual mode (0) must not poll at all — nothing checks on its own there.
+function previewRefetchMs(running, intervalMs) {
+  if (!running) return false
+  const ms = Number(intervalMs)
+  if (!Number.isFinite(ms) || ms <= 0) return false
+  return Math.max(1000, ms)
+}
+
 function PeripheralVisionPane({ ctx }) {
   const queryClient = useQueryClient()
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -477,10 +487,15 @@ function PeripheralVisionPane({ ctx }) {
   const focusedSessionId = useValue(host.state.focusedSessionId)
   const activeSessionId = useValue(host.state.activeSessionId)
   const liveSessionId = focusedSessionId || activeSessionId
+  // What the watch is pointed at right now — part of the preview's query key, so a source switch
+  // fetches the new source's frame instead of showing the previous one from cache.
+  const watchedId = (data.source && data.source.id) || ''
   const preview = useQuery({
-    queryKey: [ID, 'preview'],
+    // Keyed on WHAT is watched: switching source must fetch immediately, not reuse the frame
+    // cached under a source-agnostic key.
+    queryKey: [ID, 'preview', 'watch', watchedId],
     queryFn: () => ctx.rest('/preview'),
-    refetchInterval: running ? 6000 : false,
+    refetchInterval: previewRefetchMs(running, intervalMs),
     // Gate closed → no fetch; the pane's held selection is what may show the screen.
     enabled: running && gateOpen
   })
