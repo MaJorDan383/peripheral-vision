@@ -139,11 +139,37 @@ _LAST_FRAME_LOCK = LAST_FRAME_LOCK
 
 # ── Camera mode negotiation ─────────────────────────────────────────────────
 
-CAMERA_MAX_INDEX = int(os.environ.get("PV_CAMERA_MAX_INDEX") or 4)
-CAMERA_CACHE_S = int(os.environ.get("PV_CAMERA_CACHE_S") or 600)
+def _env_int(name: str, default: int) -> int:
+    """An int knob that survives a typo — a bad value must not break the backend at import."""
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+CAMERA_MAX_INDEX = _env_int("PV_CAMERA_MAX_INDEX", 4)
+CAMERA_CACHE_S = _env_int("PV_CAMERA_CACHE_S", 600)
 CAMERA_PROBE_TIMEOUT_S = float(os.environ.get("PV_CAMERA_PROBE_TIMEOUT_S") or 5.0)
 
 CAMERA_MODES: tuple[tuple[int, int], ...] = ((3840, 2160), (1920, 1080), (1280, 720))
+# A watch captures at the largest mode its driver honours, and those pixels are downscaled again
+# for the model's intake — so a big mode can buy nothing but camera time (the C920 here delivers
+# 2304x1536 at roughly half a second a frame). ``PV_CAMERA_MAX_WIDTH`` bounds the ladder when that
+# trade is not wanted; unset or 0 keeps the old behaviour.
+CAMERA_MAX_WIDTH = _env_int("PV_CAMERA_MAX_WIDTH", 0)
+
+
+def _camera_modes_to_try() -> tuple[tuple[int, int], ...]:
+    """The mode ladder, bounded by ``PV_CAMERA_MAX_WIDTH`` — no rung above the cap is ever asked.
+
+    Empty means every rung is above the cap: the camera keeps whatever mode it opens with, which
+    is smaller than any rung on the devices seen here.
+    """
+    if CAMERA_MAX_WIDTH <= 0:
+        return CAMERA_MODES
+    return tuple(mode for mode in CAMERA_MODES if mode[0] <= CAMERA_MAX_WIDTH)
+
+
 _CAMERA_MODES: dict[int, tuple[int, int]] = {}
 _CAMERA_MODES_LOADED = False
 _MODES_LOCK = threading.Lock()
@@ -258,11 +284,70 @@ def _size_with_remembered_mode(index: int, width: int, height: int) -> tuple[int
     640x480 — while a watch negotiates and remembers a bigger one. The row is what the user reads
     before picking, so what a watch actually delivers wins. Cheap, and it keeps a camera that the
     probe could not open (held by the watch, or by another app) from advertising a stale size.
+
+    A mode above ``PV_CAMERA_MAX_WIDTH`` is not what a watch will use, so it is not advertised.
     """
     mode = _camera_mode(index)
-    if mode and (mode[0] > width or mode[1] > height):
+    within_cap = CAMERA_MAX_WIDTH <= 0 or (mode is not None and mode[0] <= CAMERA_MAX_WIDTH)
+    if mode and within_cap and (mode[0] > width or mode[1] > height):
         return int(mode[0]), int(mode[1])
     return width, height
+
+
+def _cap_size(cap: Any) -> Optional[tuple[int, int]]:
+    """The size a live capture handle reports, or None when it reports nothing usable."""
+    try:
+        import cv2
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
+    except Exception:
+        return None
+    return (width, height) if width and height else None
+
+
+def _camera_row(
+    index: int,
+    name: str,
+    *,
+    readable: Optional[bool] = None,
+    size: Optional[tuple[int, int]] = None,
+    quiet: bool = False,
+    badge: str = "",
+    previous: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """One camera row — the single place the picker's camera schema is written.
+
+    Four builders used to emit these same ten keys with their own copy of every rule, so a change
+    to the contract had to be made in several of them: the size a row states needed three edits.
+    What genuinely differs between callers is only what is passed here — the badge, whether the
+    device is virtual, what was measured — and each caller states its own policy at the call site.
+
+    ``size`` and ``readable`` are set when the caller knows them (0 and False are answers, not
+    absences); otherwise they are filled from ``previous``. A claim is carried forward only when it
+    was True: a device that answered once is not re-probed, so asserting otherwise would be a lie.
+    ``badge`` defaults to the row's position — index 0 is the OS default camera.
+    """
+    row: dict[str, Any] = {
+        "id": f"camera-{index}",
+        "kind": "camera",
+        "index": index,
+        "label": name or f"Camera {index}",
+        "name": name,
+        "default": index == 0,
+        "badge": badge or ("default" if index == 0 else "camera"),
+    }
+    if quiet:
+        row["quiet"] = True
+    if size is not None:
+        row["width"], row["height"] = int(size[0]), int(size[1])
+    elif previous and previous.get("width") and previous.get("height"):
+        row["width"], row["height"] = previous["width"], previous["height"]
+    if readable is not None:
+        row["readable"] = readable
+    elif previous and previous.get("readable"):
+        row["readable"] = True
+    return row
 
 
 def _camera_mode(index: int) -> Optional[tuple[int, int]]:
@@ -329,16 +414,20 @@ def _apply_camera_mode(cap, width: int, height: int) -> tuple[int, int]:
 
 
 def _configure_camera_capture(cap, index: int) -> tuple[int, int]:
-    """Ask for the biggest mode this camera honours and return the delivered size."""
+    """Ask for the biggest mode this camera honours and return the delivered size.
+
+    ``PV_CAMERA_MAX_WIDTH`` bounds what is asked for: a mode the cap excludes is neither reused
+    from the remembered mode nor requested from the ladder.
+    """
     known = _camera_mode(index)
-    if known:
+    if known and (CAMERA_MAX_WIDTH <= 0 or known[0] <= CAMERA_MAX_WIDTH):
         got_w, got_h = _apply_camera_mode(cap, *known)
         if got_w and got_h:
             if (got_w, got_h) != known:
                 _remember_camera_mode(index, (got_w, got_h))
             return (got_w, got_h)
     best = (0, 0)
-    for width, height in CAMERA_MODES:
+    for width, height in _camera_modes_to_try():
         got_w, got_h = _apply_camera_mode(cap, width, height)
         if not got_w or not got_h:
             continue
@@ -485,70 +574,6 @@ def _camera_is_software_shaped(index: int) -> bool:
     )
 
 
-def _quiet_camera_entry(index: int, previous: Optional[dict[str, Any]]) -> dict[str, Any]:
-    """The picker row for a device a probe must not open.
-
-    Named from the free enumeration, sized from the mode this camera settled on last time, and
-    badged so the row explains itself. ``readable`` is only ever carried forward when it was
-    True — a device that answered once is not re-probed, so claiming otherwise would be a lie.
-    """
-    devices = _camera_devices()
-    name = devices[index]["name"] if index < len(devices) else ""
-    entry: dict[str, Any] = {
-        "id": f"camera-{index}",
-        "kind": "camera",
-        "index": index,
-        "label": name or f"Camera {index}",
-        "name": name,
-        "default": index == 0,
-        "badge": "virtual",
-        "quiet": True,
-    }
-    mode = _camera_mode(index)
-    if mode:
-        entry["width"], entry["height"] = mode
-    if previous:
-        if previous.get("readable"):
-            entry["readable"] = True
-        if not mode and previous.get("width") and previous.get("height"):
-            entry["width"], entry["height"] = previous["width"], previous["height"]
-    return entry
-
-
-def _unprobed_camera_entry(index: int, previous: Optional[dict[str, Any]]) -> dict[str, Any]:
-    """The picker row for real hardware the probe could not open this round.
-
-    A build of OpenCV with no working camera backend (this host: headless 5.0.0, neither
-    DSHOW nor MSMF — ``VideoCapture(index, CAP_DSHOW)`` can never open a DSHOW device) makes
-    every hardware probe fail. Requiring a successful frame read then made a real webcam
-    indistinguishable from a disconnected one, so it was dropped from the list entirely.
-    Hardware that enumerates is listed; a device that could not be read is marked, not
-    hidden — absence from a cached list is not absence of hardware.
-    """
-    devices = _camera_devices()
-    name = devices[index]["name"] if index < len(devices) else ""
-    entry: dict[str, Any] = {
-        "id": f"camera-{index}",
-        "kind": "camera",
-        "index": index,
-        "label": name or f"Camera {index}",
-        "name": name,
-        "default": index == 0,
-        "badge": "default" if index == 0 else "camera",
-        "readable": False,
-    }
-    mode = _camera_mode(index)
-    if mode:
-        entry["width"], entry["height"] = mode
-    if previous:
-        if previous.get("readable") and previous.get("width") and previous.get("height"):
-            entry["readable"] = True
-            entry["width"], entry["height"] = previous["width"], previous["height"]
-        elif not mode and previous.get("width") and previous.get("height"):
-            entry["width"], entry["height"] = previous["width"], previous["height"]
-    return entry
-
-
 def _probe_one_camera(index: int, names: list[str], out: dict[int, dict[str, Any]], deadline: float = 0.0) -> None:
     """Open one camera, read a frame, close it. Returns the row via ``out``.
 
@@ -570,7 +595,12 @@ def _probe_one_camera(index: int, names: list[str], out: dict[int, dict[str, Any
             # The watch is reading this camera right now — that IS a working camera. Record it
             # from the held handle instead of reopening (or the row would vanish from the picker
             # for as long as it is watched).
-            entry = _held_camera_entry(index, names, held)
+            entry = _camera_row(
+                index,
+                names[index] if index < len(names) else "",
+                readable=True,
+                size=_cap_size(held) or _camera_mode(index),
+            )
         else:
             if deadline and time.time() > deadline:
                 return  # waited out the lock — out of budget
@@ -602,19 +632,12 @@ def _probe_one_camera(index: int, names: list[str], out: dict[int, dict[str, Any
                 # reports 640x480 — while a watch negotiates and remembers a bigger one. The row
                 # is what the user reads before picking, so it describes what a watch delivers.
                 width, height = _size_with_remembered_mode(index, width, height)
-                name = names[index] if index < len(names) else ""
-                entry = {
-                    "id": f"camera-{index}",
-                    "kind": "camera",
-                    "index": index,
-                    "label": name or f"Camera {index}",
-                    "name": name,
-                    "width": width,
-                    "height": height,
-                    "default": index == 0,
-                    "readable": bool(ok),
-                    "badge": "default" if index == 0 else "camera",
-                }
+                entry = _camera_row(
+                    index,
+                    names[index] if index < len(names) else "",
+                    readable=bool(ok),
+                    size=(width, height),
+                )
             except Exception:
                 return
             finally:
@@ -625,34 +648,6 @@ def _probe_one_camera(index: int, names: list[str], out: dict[int, dict[str, Any
                         pass
     if entry is not None:
         out[index] = entry
-
-
-def _held_camera_entry(index: int, names: list[str], cap: Any) -> dict[str, Any]:
-    """The row for a camera the watch already holds open — readable by definition."""
-    name = names[index] if index < len(names) else ""
-    width = height = 0
-    try:
-        import cv2
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
-    except Exception:
-        pass
-    if not width:
-        mode = _camera_mode(index)
-        if mode:
-            width, height = mode
-    return {
-        "id": f"camera-{index}",
-        "kind": "camera",
-        "index": index,
-        "label": name or f"Camera {index}",
-        "name": name,
-        "width": width,
-        "height": height,
-        "default": index == 0,
-        "readable": True,
-        "badge": "default" if index == 0 else "camera",
-    }
 
 
 def _probe_cameras(deadline_s: float) -> None:
@@ -696,7 +691,16 @@ def _probe_cameras(deadline_s: float) -> None:
         probe_indices: list[int] = []
         for index in indices:
             if _camera_is_quiet(index):
-                out[index] = _quiet_camera_entry(index, remembered(index) or None)
+                # A quiet device is never opened; its row comes from the free enumeration, sized by
+                # the mode it settled on last time, and badged so the row explains itself.
+                out[index] = _camera_row(
+                    index,
+                    names[index] if index < len(names) else "",
+                    size=_camera_mode(index),
+                    quiet=True,
+                    badge="virtual",
+                    previous=remembered(index) or None,
+                )
             else:
                 probe_indices.append(index)
         # One camera at a time, each with its own deadline: concurrent DSHOW opens in one
@@ -726,13 +730,30 @@ def _probe_cameras(deadline_s: float) -> None:
                 # camera anybody can pick: this host advertises "HD Webcam T750", which has no
                 # device in Windows at all, and it was showing up in the picker as a dead webcam.
                 # Answer it from the enumeration instead and let the virtual toggle reveal it.
-                out[index] = _quiet_camera_entry(index, prev)
+                out[index] = _camera_row(
+                    index,
+                    names[index] if index < len(names) else "",
+                    size=_camera_mode(index),
+                    quiet=True,
+                    badge="virtual",
+                    previous=prev or None,
+                )
             else:
                 # The probe could not read it (no working OpenCV camera backend on this host,
                 # the device is held, or the deadline hit) and no usable cached row exists:
                 # list it from the free enumeration, marked unreadable — never drop real
                 # hardware from the picker just because a frame could not be read.
-                out[index] = _unprobed_camera_entry(index, prev)
+                # A previous row that was readable keeps its claim and its size; otherwise the row
+                # carries the remembered mode, marked unread. Absence from a cached list is not
+                # absence of hardware.
+                prior_ok = bool(prev and prev.get("readable") and prev.get("width") and prev.get("height"))
+                out[index] = _camera_row(
+                    index,
+                    names[index] if index < len(names) else "",
+                    readable=True if prior_ok else False,
+                    size=(int(prev["width"]), int(prev["height"])) if prior_ok else _camera_mode(index),
+                    previous=prev or None,
+                )
         devices = [out[i] for i in sorted(out)]
         if devices:
             _CAMERA_CACHE["devices"] = devices
@@ -877,8 +898,6 @@ def _is_cloaked(hwnd: int) -> bool:
         return bool(ok == 0 and value.value)
     except Exception:
         return False
-
-
 
 
 def list_windows(limit: int = 150) -> list[dict[str, Any]]:
@@ -1256,10 +1275,6 @@ def _is_blank(img) -> bool:
         return False
 
 
-
-
-
-
 # ── DWM thumbnail (for minimized windows) ─────────────────────────────────
 
 def _pump(hwnd: int, seconds: float) -> None:
@@ -1342,8 +1357,6 @@ def _thumb_host(width: int, height: int) -> int:
         _THUMB_HOST["hwnd"] = int(hwnd)
         _THUMB_HOST["size"] = (width, height)
         return int(hwnd)
-
-
 
 
 TNP_RECTDESTINATION = 0x1

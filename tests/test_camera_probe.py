@@ -186,6 +186,66 @@ def test_without_a_remembered_mode_the_measured_size_stands(probe, enumerate_dev
     assert (row["width"], row["height"]) == (640, 480)
 
 
+def test_a_resolution_cap_bounds_the_mode_ladder(probe, monkeypatch):
+    """PV_CAMERA_MAX_WIDTH keeps a watch off the biggest modes.
+
+    Those pixels are downscaled again for the model's intake, so a big mode can buy nothing but
+    camera time — the C920 here delivers 2304x1536 at roughly half a second a frame.
+    """
+    monkeypatch.setattr(cw, "CAMERA_MAX_WIDTH", 0)
+    assert cw._camera_modes_to_try() == cw.CAMERA_MODES, "unset keeps the old ladder"
+    monkeypatch.setattr(cw, "CAMERA_MAX_WIDTH", 1920)
+    assert cw._camera_modes_to_try() == ((1920, 1080), (1280, 720))
+    monkeypatch.setattr(cw, "CAMERA_MAX_WIDTH", 1280)
+    assert cw._camera_modes_to_try() == ((1280, 720),)
+    monkeypatch.setattr(cw, "CAMERA_MAX_WIDTH", 800)
+    assert cw._camera_modes_to_try() == (), "no rung fits the cap: the camera keeps its own mode"
+
+
+def test_a_capped_watch_never_asks_for_a_bigger_mode(probe, monkeypatch):
+    """The negotiation honours the cap — including a remembered mode above it."""
+    asked: list[int] = []
+
+    class _Cap:
+        def set(self, prop, value):
+            if prop == "w":
+                asked.append(int(value))
+            return True
+
+        def read(self):
+            return False, None  # no frame, so the delivered size stays unknown
+
+    monkeypatch.setattr(cw, "CAMERA_MAX_WIDTH", 1280)
+    monkeypatch.setattr(cw, "_CAMERA_MODES", {0: (2304, 1536)})
+    monkeypatch.setattr(cw, "_CAMERA_MODES_LOADED", True)
+
+    cw._configure_camera_capture(_Cap(), 0)
+
+    assert asked == [1280], f"the cap was not honoured: asked for {asked}"
+
+
+def test_a_remembered_mode_above_the_cap_is_not_advertised(probe, monkeypatch):
+    """A row must not promise a size the capped watch will not use."""
+    monkeypatch.setattr(cw, "_CAMERA_MODES", {0: (2304, 1536)})
+    monkeypatch.setattr(cw, "_CAMERA_MODES_LOADED", True)
+
+    monkeypatch.setattr(cw, "CAMERA_MAX_WIDTH", 1280)
+    assert cw._size_with_remembered_mode(0, 640, 480) == (640, 480)
+
+    monkeypatch.setattr(cw, "CAMERA_MAX_WIDTH", 0)
+    assert cw._size_with_remembered_mode(0, 640, 480) == (2304, 1536)
+
+
+def test_a_typo_in_an_int_knob_does_not_break_the_backend(probe, monkeypatch):
+    """A bad PV_CAMERA_* value used to raise at import, taking the whole backend down with it."""
+    monkeypatch.setenv("PV_CAMERA_MAX_WIDTH", "wide")
+    assert cw._env_int("PV_CAMERA_MAX_WIDTH", 0) == 0
+    monkeypatch.setenv("PV_CAMERA_MAX_WIDTH", "1280")
+    assert cw._env_int("PV_CAMERA_MAX_WIDTH", 0) == 1280
+    monkeypatch.delenv("PV_CAMERA_MAX_WIDTH", raising=False)
+    assert cw._env_int("PV_CAMERA_MAX_WIDTH", 7) == 7
+
+
 def test_the_windows_device_query_is_memoised_per_name(probe, monkeypatch):
     """The lookup behind the CLSID tiebreaker is a PowerShell shell-out — 3.7 s cold, measured.
 

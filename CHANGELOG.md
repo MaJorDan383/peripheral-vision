@@ -3,6 +3,41 @@
 All notable changes to this plugin. Nothing before the first public release was published, so
 `1.0.0` covers the whole plugin as shipped.
 
+## [1.5.1] - 2026-10-13
+
+### Added
+- **`PV_CAMERA_MAX_WIDTH` caps the mode a watch negotiates** (`1280`, say). Every frame is
+  downscaled again for the model's intake, so the largest mode a driver honours can cost camera
+  time for nothing — the C920 here negotiates 2304x1536 and pays roughly half a second a frame for
+  it. Unset or `0` keeps the previous behaviour, a mode above the cap is neither reused from the
+  remembered mode nor asked for, and no row advertises a size the capped watch will not use.
+- **The pane's pure helpers have tests.** `tests/test_pane_helpers.py` drives `visibleCameras` and
+  `previewRefetchMs` through node in an empty vm context and pins the two call-site contracts that
+  regressed in the field: the watched image follows the Blink rate, and its query key names the
+  source it watches.
+
+### Changed
+- **One camera row, one contract.** Four builders — probed, held, unreadable, virtual — each
+  emitted the same ten keys with their own copy of every rule, so a change to the contract had to
+  be made in several of them (the size a row states needed three edits). They are now a single
+  `_camera_row(...)`, with each caller stating its own policy at the call site.
+- **The CLSID tiebreaker's device query is memoised.** It is a PowerShell shell-out (3.68 s cold,
+  measured over 241 names) and `/preview` consults it per camera row; a repeat no longer pays for
+  it, and a refreshed name set clears the verdicts derived from it.
+
+### Fixed
+- **A lost DWM thumbnail host is rebuilt.** The host handle was cached for the life of the process
+  with no validity check, so one lost window — a crashed thread, a session change — would have
+  failed every later minimized-window thumbnail until the process restarted.
+- **A typo'd integer knob no longer takes the backend down.** `PV_CAMERA_MAX_INDEX`,
+  `PV_CAMERA_CACHE_S` and `PV_CAMERA_MAX_WIDTH` are parsed by a helper that falls back to the
+  default instead of raising at import.
+
+### Notes
+- The Windows capture paths (GDI/PrintWindow, the DWM thumbnail host, DirectShow probing and
+  capture) were exercised live on the maintainer's host; macOS and Linux/PipeWire remain
+  unit-tested only.
+
 ## [1.5.0] - 2026-10-13
 
 ### Added

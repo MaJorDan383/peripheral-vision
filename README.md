@@ -189,6 +189,7 @@ the Hermes backend (the desktop app inherits your user environment):
 | `PV_CAMERA_MAX_INDEX` | `4` | Probe floor — the probe covers every enumerated camera, never fewer than this |
 | `PV_CAMERA_CACHE_S` | `600` | Seconds the enumerated camera list stays cached |
 | `PV_CAMERA_PROBE_TIMEOUT_S` | `5.0` | Timeout (seconds) for detecting one camera |
+| `PV_CAMERA_MAX_WIDTH` | `0` | Cap the mode a watch negotiates, e.g. `1280`. Frames are downscaled for the model's intake anyway, so the biggest mode can cost camera time for nothing — unset or `0` keeps the largest mode the driver honours |
 | `PV_CAMERA_PROBE_ALL` | _(unset)_ | Set to `1` to probe every camera again. Probes skip virtual cameras — opening Phone Link's virtual camera pops its stream window — so those rows carry their remembered size until picked, and the picker lists them only when **Show virtual cameras** is ticked |
 
 Choosing the vision model is **not** an environment variable. Frames go to whatever can read them,
