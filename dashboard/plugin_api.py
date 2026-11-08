@@ -117,8 +117,18 @@ LOG_KEEP = 400  # ring buffer size for descriptions
 # and the pane prompts for a vision-capable model — it never silently hands the
 # screen to a different provider.
 OVERRIDE_PATH = STATE_DIR / "vision_model.json"
+# What this plugin has itself observed about a model's eyes: a route that described a frame can
+# see, one that refused image input cannot. Relays rename models per key and the catalog cannot
+# know those aliases, so a verdict learned from a real call is the only honest answer available
+# for them. Absent = unknown, which the pane never renders as "cannot see".
+OBSERVED_CAPS_PATH = STATE_DIR / "observed_caps.json"
 VISION_TIMEOUT_S = int(os.environ.get("PV_VISION_TIMEOUT_S") or 60)
 VISION_ATTEMPTS = int(os.environ.get("PV_VISION_ATTEMPTS") or 2)
+# Output budget for a description. It has to cover the REASONING a model writes before its
+# answer: behind a relay a "vision" slug can be a reasoning model whose 1600-character think
+# block costs ~400 tokens on its own, so the old 400 cap returned finish_reason "length" with
+# empty content and the pane reported a perfectly good model as having returned no text.
+VISION_MAX_TOKENS = int(os.environ.get("PV_VISION_MAX_TOKENS") or 1200)
 SOURCE_FAILURE_LIMIT = int(os.environ.get("PV_SOURCE_FAILURE_LIMIT") or 3)
 VISION_MAX_WIDTH = int(os.environ.get("PV_VISION_MAX_WIDTH") or 1024)
 # ── Model intake ──────────────────────────────────────────────────────────────
@@ -607,6 +617,7 @@ class _NeedsVisionModel(RuntimeError):
 
 _CFG_CACHE: dict[str, Any] = {"at": 0.0, "cfg": None}
 _CAP_CACHE: dict[tuple[str, str], tuple[float, Optional[bool]]] = {}
+_OBSERVED_CAPS: dict[tuple[str, str], bool] = {}  # (provider, model) -> verdict seen at runtime
 
 
 def _hermes_cfg(ttl: float = 5.0) -> dict[str, Any]:
@@ -627,6 +638,41 @@ def _hermes_cfg(ttl: float = 5.0) -> dict[str, Any]:
     return {}
 
 
+def _live_session_record(session_id: str) -> Optional[dict[str, Any]]:
+    """The live session record for ``session_id``, however the caller names it.
+
+    The desktop pane sends the STORED session id (the ``local-…`` id from its session list and
+    the ``?resume=`` URL), but ``_sessions`` is keyed by a short per-process RUNTIME id and keeps
+    the stored id in ``session_key``. A plain ``_sessions.get(stored_id)`` therefore missed the
+    very session on screen and every lookup fell back to the profile default in ``config.yaml``:
+    frames went to a model the user is not talking to, and the pane credited that model. Match
+    the runtime id first, then the stored key, then the agent's own ``session_id`` — all three
+    identities name one conversation.
+    """
+    if not session_id:
+        return None
+    try:
+        from tui_gateway import server as gw
+
+        with gw._sessions_lock:
+            sessions = dict(gw._sessions)
+    except Exception:
+        return None
+    record = sessions.get(session_id)
+    if isinstance(record, dict):
+        return record
+    for record in sessions.values():
+        if not isinstance(record, dict) or record.get("_finalized"):
+            continue
+        agent = record.get("agent")
+        if (
+            str(record.get("session_key") or "") == session_id
+            or str(getattr(agent, "session_id", "") or "") == session_id
+        ):
+            return record
+    return None
+
+
 def _live_session_model(session_id: str) -> tuple[str, str]:
     """(provider, model) the given LIVE chat session is running right now.
 
@@ -635,18 +681,38 @@ def _live_session_model(session_id: str) -> tuple[str, str]:
     happens to name. This runs inside the desktop's own ``serve`` backend, so the
     live session registry is right here — and ``_session_info`` is the same
     resolver the app renders from, so both surfaces agree by construction.
-    """
-    if not session_id:
-        return ("", "")
-    try:
-        from tui_gateway import server as gw
 
-        with gw._sessions_lock:
-            session = gw._sessions.get(session_id)
-        if not isinstance(session, dict):
-            return ("", "")
-        info = gw._session_info(session.get("agent"), session)
-        return (str(info.get("provider") or "").strip(), str(info.get("model") or "").strip())
+    A session whose agent has not been built yet (a resumed chat, a lazily created
+    one) carries its route in ``model_override`` and, failing that, runs the
+    profile default — so answer from those instead of reporting "no live session"
+    and silently describing with a different model than the one on screen.
+    """
+    session = _live_session_record(session_id)
+    if session is None:
+        return ("", "")
+    agent = session.get("agent")
+    if agent is not None:
+        try:
+            from tui_gateway import server as gw
+
+            info = gw._session_info(agent, session)
+            provider = str(info.get("provider") or "").strip()
+            model = str(info.get("model") or "").strip()
+            if model:
+                return (provider, model)
+        except Exception:
+            pass
+    override = session.get("model_override")
+    if isinstance(override, dict) and str(override.get("model") or "").strip():
+        return (
+            str(override.get("provider") or "").strip(),
+            str(override.get("model") or "").strip(),
+        )
+    try:
+        from tui_gateway.model_switch import _session_default_route
+
+        model, provider = _session_default_route(session)
+        return (str(provider or "").strip(), str(model or "").strip())
     except Exception:
         return ("", "")
 
@@ -675,8 +741,19 @@ def _specified_vision(cfg: dict[str, Any], provider: str, model: str) -> Optiona
     Uses Hermes' own resolver (config overrides → managed local runtime →
     models.dev catalog → Ollama probe → provider profile) so this plugin never
     keeps a competing list of what can see.
+
+    A model the catalog has never heard of — every relay alias, which is most of what
+    OpenAI-compatible gateways front — resolves to ``None``, not ``False``: "unknown" is the
+    honest answer, and the pane treats only ``False`` as "cannot see". What this plugin CAN
+    add is its own evidence: a frame described successfully, or the endpoint explicitly
+    refusing image input. That observation outranks a catalog that does not list the model.
     """
     key = (provider, model)
+    if not _OBSERVED_CAPS:
+        _observed_capability()
+    observed = _OBSERVED_CAPS.get(key)
+    if observed is not None:
+        return observed
     now = time.time()
     hit = _CAP_CACHE.get(key)
     if hit and now - hit[0] < 30.0:
@@ -690,6 +767,43 @@ def _specified_vision(cfg: dict[str, Any], provider: str, model: str) -> Optiona
         verdict = None
     _CAP_CACHE[key] = (now, verdict)
     return verdict
+
+
+def _observed_capability() -> dict[tuple[str, str], bool]:
+    """Capability verdicts this process has actually seen, persisted across restarts.
+
+    The catalog cannot know a relay's aliases, so the plugin keeps the two facts it can
+    establish itself: a route that described a frame can see, and a route that refused image
+    input cannot. Anything else stays absent (unknown).
+    """
+    if _OBSERVED_CAPS:
+        return _OBSERVED_CAPS
+    try:
+        data = json.loads(OBSERVED_CAPS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _OBSERVED_CAPS
+    if isinstance(data, dict):
+        for name, value in data.items():
+            provider, _, model = str(name).partition("\x1f")
+            if provider and model and isinstance(value, bool):
+                _OBSERVED_CAPS[(provider, model)] = value
+    return _OBSERVED_CAPS
+
+
+def _remember_capability(provider: str, model: str, sees: bool) -> None:
+    """Record one observed verdict so the next status poll reports it."""
+    if not provider or not model:
+        return
+    key = (provider, model)
+    if _OBSERVED_CAPS.get(key) is sees:
+        return
+    _OBSERVED_CAPS[key] = sees
+    _CAP_CACHE.pop(key, None)  # the observation outranks a cached catalog miss
+    try:
+        payload = {f"{p}\x1f{m}": v for (p, m), v in _OBSERVED_CAPS.items()}
+        _write_json(OBSERVED_CAPS_PATH, payload)
+    except Exception:  # best-effort: a read-only state dir must not break describing
+        pass
 
 
 def _env_value(name: str) -> str:
@@ -719,14 +833,15 @@ def _live_session_endpoint(session_id: str, provider: str) -> tuple[str, str]:
     """
     if not session_id or not provider:
         return ("", "")
+    session = _live_session_record(session_id)
+    if session is None:
+        return ("", "")
+    agent = session.get("agent")
+    if agent is None:
+        return ("", "")
     try:
         from tui_gateway import server as gw
 
-        with gw._sessions_lock:
-            session = gw._sessions.get(session_id)
-        agent = (session or {}).get("agent") if isinstance(session, dict) else None
-        if agent is None:
-            return ("", "")
         info = gw._session_info(agent, session)
         if str(info.get("provider") or "").strip() != provider:
             return ("", "")  # pinned model on another provider — resolve it independently
@@ -914,10 +1029,12 @@ def _route(session_id: str = "") -> dict[str, Any]:
     1. an explicit ``auxiliary.vision`` pick in Hermes' config — the user named the model
        that does vision work, so frames go there (the same rule Hermes applies to images
        attached to a turn, even when the session model can see);
-    2. otherwise, the model the CURRENT SESSION is running while it can see — frames go
-       to whatever model the conversation is on right now;
-    3. otherwise (a text-only session), a model pinned from the pane, which also stays
-       in ``fallback_*`` so a runtime refusal can fall back to it exactly once.
+    2. otherwise, a model pinned from the pane, unless Hermes positively says the session
+       model can see — the pin is an explicit "describe with this", so an UNKNOWN verdict
+       must not silently outrank it. That is how a pinned relay model the catalog has never
+       heard of was ignored in favour of a text-only config default;
+    3. otherwise, the model the CURRENT SESSION is running;
+    and the pin always stays in ``fallback_*`` so a runtime refusal can fall back to it.
     """
     sid = session_id or str(_WATCH_SESSION.get("id") or "")
     cfg = _hermes_cfg()
@@ -936,7 +1053,10 @@ def _route(session_id: str = "") -> dict[str, Any]:
         source = "auxiliary"
         base_url = aux["base_url"] or _endpoint(cfg, provider, sid)[0]
     else:
-        use_pin = bool(pinned.get("model")) and active_caps is False
+        # A pin is the user's explicit choice for descriptions. Only a model Hermes says CAN
+        # see outranks it — "unknown" is not evidence, and treating it as "cannot see" made
+        # the pin inert exactly where it is needed (a relay model the catalog does not list).
+        use_pin = bool(pinned.get("model")) and active_caps is not True
         provider = pinned.get("provider") if use_pin else active_provider
         model = pinned.get("model") if use_pin else active_model
         source = "pinned" if use_pin else active_source
@@ -984,9 +1104,13 @@ def _looks_multimodal(name: str) -> bool:
 def _vision_candidates(cfg: dict[str, Any], route: dict[str, Any]) -> list[dict[str, str]]:
     """Vision-capable models the user can pin, the currently active one first.
 
-    Candidates come from configured providers: models declaring
-    ``supports_vision: true``, then models whose name suggests image input and
-    that Hermes does not report as text-only.
+    Candidates come from configured providers: models this plugin has PROVEN can see (their
+    frames were described), then models declaring ``supports_vision: true``, then models whose
+    name suggests image input and that Hermes does not report as text-only.
+
+    The proven list leads because it is the only evidence available for a relay: an
+    OpenAI-compatible gateway renames models per key, so neither ``config.yaml`` nor models.dev
+    can say whether ``cmd/…-vision-exp`` sees, while a described frame settles it.
     """
     out: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -1002,6 +1126,9 @@ def _vision_candidates(cfg: dict[str, Any], route: dict[str, Any]) -> list[dict[
     where = "this session" if route.get("active_source") == "session" else "config default"
     if route.get("supports_vision") is not False:
         add(active_provider, active_model, f"{active_provider} · {active_model} ({where})")
+
+    _observed_capability()
+    proven = [pair for pair, sees in _OBSERVED_CAPS.items() if sees]
 
     verified: list[tuple[str, str]] = []
     suggested: list[tuple[str, str]] = []
@@ -1023,10 +1150,15 @@ def _vision_candidates(cfg: dict[str, Any], route: dict[str, Any]) -> list[dict[
         for name in undecided:
             if _looks_multimodal(name) and _specified_vision(cfg, str(provider), name) is not False:
                 suggested.append((str(provider), name))
+    for provider, model in proven:
+        add(provider, model, f"{provider} · {model} (described a frame)")
     for provider, model in verified:
         add(provider, model)
     for provider, model in suggested:
-        add(provider, model)
+        # A name hint is a guess; an observation is evidence. A model this plugin has already
+        # watched fail is not offered again just because its name contains "vision".
+        if _OBSERVED_CAPS.get((provider, model)) is not False:
+            add(provider, model)
     return out
 
 
@@ -1062,18 +1194,127 @@ def _message_text(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _rejects_images(status: int, detail: str) -> bool:
-    """True when the endpoint is refusing image input (capability) rather than failing transiently."""
-    text = (detail or "").lower()
-    mentions_image = any(
-        word in text
-        for word in ("image", "vision", "multimodal", "content part", "content type", "media", "modality")
-    )
-    if not mentions_image:
+def _budget_exhausted(payload: dict[str, Any]) -> bool:
+    """True when the completion stopped on the token cap with nothing in ``content``.
+
+    Vision endpoints in front of a REASONING model spend the budget on ``reasoning_content``
+    before writing a single visible token, so a 400-token cap returns
+    ``finish_reason: "length"`` with empty text. Reading that as "returned no text" told the
+    user a model that sees perfectly well was broken; the frame is described on the retry with
+    a budget that leaves room for the answer.
+    """
+    choices = payload.get("choices") or []
+    if not choices:
         return False
-    return status in (400, 404, 415, 422) or any(
-        word in text for word in ("not support", "unsupported", "does not support", "invalid")
-    )
+    if _message_text(payload):
+        return False
+    return str(choices[0].get("finish_reason") or "").lower() == "length"
+
+
+class _TokenStarved(RuntimeError):
+    """The completion hit the token cap before writing any text — retried with more room."""
+
+    def __init__(self, max_tokens: int) -> None:
+        self.max_tokens = max_tokens
+        super().__init__(f"the model used all {max_tokens} tokens before answering")
+
+
+# A text-only model behind a relay does not always refuse the request: it receives the whole
+# payload, cannot see the picture, and ANSWERS anyway — "I'm sorry, but I can't see the contents
+# of your screen…". That is a description in form and a non-answer in fact, and recording it as
+# proof of vision is how a blind model ended up first in the pane's candidate list.
+_BLIND_ANSWER_PATTERNS = (
+    r"can(?:no|')?t see (?:the |any )?(?:contents? of (?:your|the) )?"
+    r"(?:(?:computer|device|actual|whole|entire) )?(?:screen|image|picture|screenshot|attachment)",
+    r"(?:do not|don't|cannot|can't) (?:actually )?see (?:any |the )?"
+    r"(?:(?:computer|device) )?(?:image|picture|screenshot|screen)",
+    r"i (?:can(?:no|')t|am unable to) (?:view|process|access|read) (?:the |any )?"
+    r"(?:(?:computer|device) )?(?:image|picture|screenshot|screen)",
+    r"as an? (?:ai|language model)[^.]{0,40}?(?:cannot|can't|don't|do not) (?:see|view|process) (?:images?|pictures?|screenshots?)",
+    r"(?:image|picture|screenshot|attachment) (?:is|was) (?:not|never) (?:provided|attached|received|included)",
+    r"there is no image (?:here|provided|attached|in this)",
+    r"i (?:don't|do not) have (?:access to )?(?:the |an? )?(?:image|picture|screenshot)",
+    r"(?:no|without) (?:image|picture|screenshot|visual) (?:was |were |is |has been )?(?:provided|attached|received|included)",
+)
+
+
+def _answer_without_seeing(text: str) -> bool:
+    """True when the reply is the model admitting it could not see the frame.
+
+    A relay in front of a text-only model returns HTTP 200 and a polite apology rather than an
+    error, so status and ``finish_reason`` are both clean and only the wording tells the two
+    apart. A reply that opens by disclaiming the image is not evidence of vision.
+
+    Curly apostrophes are folded to ASCII first: models emit ``can’t`` as often as ``can't``,
+    and a pattern that only knows the straight form misses the most common answer of all.
+    """
+    lowered = (text or "").replace("\u2019", "'").replace("\u2018", "'").replace("\u02bc", "'")
+    lowered = " ".join(lowered.lower().split())
+    if not lowered:
+        return False
+    return any(re.search(pattern, lowered) for pattern in _BLIND_ANSWER_PATTERNS)
+
+
+_IMAGE_REFUSAL_PATTERNS = (
+    # The endpoint names IMAGE INPUT as the thing it will not take. Every pattern has to be about
+    # the payload's modality, because the giveaway words ("image", "vision", "media") show up in
+    # error bodies that mean something else entirely — a model id containing "vision", an
+    # image-GENERATION model rejected on the chat path, an embedding model. Reading those as
+    # "cannot process images" tells the user their vision model is blind when it is not (#196).
+    r"supports? text input only",
+    r"(?:does|do) not (?:support|accept|handle|allow) (?:any )?(?:image|vision|multimodal)",
+    r"(?:can(?:no|')t|cannot|unable to) (?:process|accept|handle|read) (?:any )?(?:image|vision|media)",
+    r"(?:image|vision|multimodal)\w*[^.]{0,60}?(?:inputs?|contents?|attachments?|parts?|messages?)?"
+    r"[^.]{0,20}?(?:is|are) not (?:supported|accepted|allowed)",
+    r"(?:unsupported|invalid|unknown) (?:content|media)[ _]?type",
+    r"unsupported content part",
+    r"image_url[^.]{0,60}?(?:not supported|unsupported|invalid|not allowed)",
+    r"(?:no|without) (?:vision|image|multimodal) (?:support|capabilit\w*|input)",
+    r"not a (?:vision|multimodal) model",
+    r"(?:modality|modalit\w+)[^.]{0,40}?(?:not supported|unsupported)",
+)
+
+# Bodies that explain WHY a route failed without saying anything about its eyes. A model that is
+# missing, misnamed, out of catalogue, out of credit or out of context is a ROUTE problem, and
+# reporting it as a capability verdict is the bug this list exists to prevent.
+_NOT_A_CAPABILITY_VERDICT = (
+    r"not found",
+    r"not available",
+    r"is not a chat model",
+    r"image[- ]generation model",
+    r"unsupported_model",
+    r"not supported on this endpoint",
+    r"(?:no|invalid|missing) (?:active )?(?:credentials|api[ _]?key)",
+    r"authentication",
+    r"unauthori[sz]ed",
+    r"forbidden",
+    r"insufficient (?:quota|credit\w*|balance|funds)",
+    r"(?:rate|usage) limit",
+    r"too (?:large|long|many tokens)",
+    r"max_tokens",
+    r"context (?:length|window)",
+    r"does not (?:exist|match)",
+)
+
+
+def _rejects_images(status: int, detail: str) -> bool:
+    """True when the endpoint is refusing IMAGE INPUT (a capability verdict), not failing otherwise.
+
+    Both halves matter. The refusal must name the payload's modality, and the body must not be one
+    of the route-level explanations that merely happen to contain the word "image" — an unavailable
+    model, an image-generation model on the chat path, an embedding endpoint. Only an explicit
+    modality refusal, at a status that can carry one, earns the "this model cannot see" verdict that
+    pauses the user's watch.
+    """
+    text = " ".join((detail or "").lower().split())
+    if not text:
+        return False
+    if any(re.search(pattern, text) for pattern in _NOT_A_CAPABILITY_VERDICT):
+        return False
+    if not any(re.search(pattern, text) for pattern in _IMAGE_REFUSAL_PATTERNS):
+        return False
+    return status in (400, 403, 404, 415, 422) or 500 > status >= 400
+
 
 
 class _UpstreamError(RuntimeError):
@@ -1117,12 +1358,20 @@ def _client_user_agent() -> str:
         return "HermesAgent/1.0"
 
 
-def _post_chat(base_url: str, key: str, model: str, messages: list[Any], headers: dict[str, str]) -> str:
+def _post_chat(
+    base_url: str,
+    key: str,
+    model: str,
+    messages: list[Any],
+    headers: dict[str, str],
+    max_tokens: Optional[int] = None,
+) -> str:
     """One chat completion, sent the way Hermes itself sends it.
 
     Uses the OpenAI SDK (same transport, TLS fingerprint, UA and affinity headers as a real turn)
     when available; a plain request with matching headers otherwise.
     """
+    budget = int(max_tokens or VISION_MAX_TOKENS)
     try:
         from openai import OpenAI
     except Exception:
@@ -1132,7 +1381,7 @@ def _post_chat(base_url: str, key: str, model: str, messages: list[Any], headers
         client = OpenAI(base_url=base_url, api_key=key or "unused", timeout=VISION_TIMEOUT_S, max_retries=0)
         try:
             resp = client.chat.completions.create(
-                model=model, messages=messages, max_tokens=400, extra_headers=headers or None
+                model=model, messages=messages, max_tokens=budget, extra_headers=headers or None
             )
         except Exception as exc:
             status = getattr(exc, "status_code", None)
@@ -1144,12 +1393,15 @@ def _post_chat(base_url: str, key: str, model: str, messages: list[Any], headers
                     body = str(exc)[:300]
                 raise _UpstreamError(status, body) from exc
             raise
-        return _message_text(resp.model_dump())
+        payload = resp.model_dump()
+        if _budget_exhausted(payload) and budget < VISION_MAX_TOKENS:
+            raise _TokenStarved(budget)
+        return _message_text(payload)
 
     import urllib.error
     import urllib.request
 
-    payload = {"model": model, "max_tokens": 400, "messages": messages}
+    payload = {"model": model, "max_tokens": budget, "messages": messages}
     request_headers = {"Content-Type": "application/json", "User-Agent": _client_user_agent()}
     request_headers.update(headers or {})
     if key:
@@ -1159,13 +1411,16 @@ def _post_chat(base_url: str, key: str, model: str, messages: list[Any], headers
     )
     try:
         with urllib.request.urlopen(request, timeout=VISION_TIMEOUT_S) as response:
-            return _message_text(json.loads(response.read().decode("utf-8")))
+            body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
             detail = (exc.read().decode("utf-8", "replace") or "")[:300].strip()
         except Exception:
             detail = ""
         raise _UpstreamError(exc.code, detail or str(exc.reason)) from exc
+    if _budget_exhausted(body) and budget < VISION_MAX_TOKENS:
+        raise _TokenStarved(budget)
+    return _message_text(body)
 
 
 def _describe_with_model(png: bytes, route: dict[str, Any]) -> str:
@@ -1215,12 +1470,44 @@ def _describe_with_model(png: bytes, route: dict[str, Any]) -> str:
     last_exc: Optional[Exception] = None
     for attempt in range(max(1, VISION_ATTEMPTS)):
         try:
-            text = _post_chat(base_url, key, str(route.get("model") or ""), messages, headers)
+            text = _post_chat(
+                base_url,
+                key,
+                str(route.get("model") or ""),
+                messages,
+                headers,
+                # A first attempt with a modest cap still fits an ordinary model's answer; a
+                # reasoning model that spends it all on its think block gets the full budget.
+                max_tokens=None if attempt else min(400, VISION_MAX_TOKENS),
+            )
+            if text and _answer_without_seeing(text):
+                # 200 OK, clean finish_reason, and the reply is an apology for not seeing the
+                # frame: the model is text-only. This is the honest capability verdict, and it
+                # must not be recorded as proof of vision.
+                _remember_capability(
+                    str(route.get("provider") or ""), str(route.get("model") or ""), False
+                )
+                raise _NeedsVisionModel(
+                    route.get("provider", ""),
+                    route.get("model", ""),
+                    "the model answered without seeing the frame",
+                )
             if text:
+                _remember_capability(
+                    str(route.get("provider") or ""), str(route.get("model") or ""), True
+                )
                 return text
             last_exc = RuntimeError(f"{label} returned no text")
+        except _TokenStarved:
+            last_exc = RuntimeError(
+                f"{label} used its whole output budget on reasoning before answering"
+            )
+            continue  # next attempt uses the full VISION_MAX_TOKENS budget
         except _UpstreamError as exc:
             if _rejects_images(exc.status, exc.detail):
+                _remember_capability(
+                    str(route.get("provider") or ""), str(route.get("model") or ""), False
+                )
                 raise _NeedsVisionModel(
                     route.get("provider", ""),
                     route.get("model", ""),
@@ -1301,16 +1588,19 @@ def _session_route(primary: dict[str, Any]) -> dict[str, Any]:
 def _describe_ladder() -> list[dict[str, Any]]:
     """The routes to try, best first: what the user configured, then what can actually see.
 
-    1. the resolved route — the ``auxiliary.vision`` pick, else the session/pinned model;
-    2. when that was an aux pick: the ACTIVE SESSION model. A pick whose key, permission or
-       endpoint is unavailable must not cost the user their descriptions while the model they are
-       already talking to can read a frame perfectly well — and when that model is text-only, it
-       still belongs on the ladder, because it is the thing the error has to name;
+    1. the resolved route — the ``auxiliary.vision`` pick, else the pin, else the session model;
+    2. when that was an aux pick or a pin: the ACTIVE SESSION model. A pick whose key, permission
+       or endpoint is unavailable must not cost the user their descriptions while the model they
+       are already talking to can read a frame perfectly well — and when that model is text-only,
+       it still belongs on the ladder, because it is the thing the error has to name;
     3. the model pinned in the pane (the existing fallback for a model that cannot see).
     """
     primary = _route()
     routes = [primary]
-    if primary.get("source") == "auxiliary" and primary.get("active_model"):
+    leads_elsewhere = primary.get("source") in {"auxiliary", "pinned"}
+    if leads_elsewhere and primary.get("active_model"):
+        # The session model is the rung under a pick that leads somewhere else. Without it a pin
+        # that stops working (a retired relay alias) took the working session model down with it.
         routes.append(_session_route(primary))
     if primary.get("source") != "pinned":
         pinned = _pin_route()
@@ -1391,6 +1681,8 @@ def _describe(png: bytes) -> str:
             raise RuntimeError(f"{route.get('provider')}/{route.get('model')} returned no text")
         _LAST_DESCRIBER = f"{route.get('provider')}/{route.get('model')}"
         _LAST_ROUTE = route
+        # First-hand evidence, which a catalog can never supply for a relay's alias.
+        _remember_capability(str(route.get("provider") or ""), str(route.get("model") or ""), True)
         return text
 
     raise _vision_give_up(dead)

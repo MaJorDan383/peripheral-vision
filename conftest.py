@@ -55,3 +55,26 @@ if "numpy" in sys.modules and not hasattr(sys.modules["numpy"], "isscalar"):
 
     _np.asarray = _asarray
     _np.ndindex = lambda shape: iter([()])
+
+
+def pytest_configure(config) -> None:  # noqa: ANN001 - pytest's own hook shape
+    """Point the backend's state at a throwaway HERMES_HOME for the whole session.
+
+    The backend resolves ``STATE_DIR`` (and every ``*_PATH`` derived from it) at IMPORT time
+    from ``$HERMES_HOME/cache/peripheral-vision``. On a machine that actually runs this plugin
+    those files exist, so a suite that read them inherited the developer's own pin and status —
+    a pinned ``om/auto/best-vision`` sent ``_describe`` to a route with no endpoint in the test
+    process and two pipeline tests failed for a reason that had nothing to do with the code.
+    ``pytest_configure`` runs before collection, so the env var is set before any test module
+    imports ``plugin_api``. Hermetic, like the rest of the suite: no config, no keys, no files.
+    """
+    import atexit
+    import os
+    import shutil
+    import tempfile
+
+    scratch = tempfile.mkdtemp(prefix="pv-tests-")
+    os.environ["HERMES_HOME"] = scratch
+    atexit.register(shutil.rmtree, scratch, True)
+
+

@@ -178,6 +178,7 @@ the Hermes backend (the desktop app inherits your user environment):
 |----------|---------|-------------|
 | `PV_VISION_TIMEOUT_S` | `60` | Timeout (seconds) for a single vision API call |
 | `PV_VISION_ATTEMPTS` | `2` | Attempts per frame before reporting failure |
+| `PV_VISION_MAX_TOKENS` | `1200` | Completion budget for a description. It has to fit a reasoning model's think block: a vision slug behind a relay can spend ~400 tokens before writing any text, and a starved reply comes back as `finish_reason: "length"` with empty content |
 | `PV_VISION_MAX_EDGE` | `1024` | Longest edge of the frame sent to the model (wins over `PV_VISION_MAX_WIDTH`) |
 | `PV_VISION_MAX_PIXELS` | _(unset)_ | Total-pixel budget for that frame; takes precedence over the edge caps |
 | `PV_VISION_MAX_WIDTH` | `1024` | Older alias for the edge cap, and the width cap on the watch's own frames |
@@ -194,12 +195,27 @@ the Hermes backend (the desktop app inherits your user environment):
 
 Choosing the vision model is **not** an environment variable. Frames go to whatever can read them,
 in this order: the `auxiliary.vision` model picked in Hermes' own settings (Settings → Models) —
-frames go there even when the session model can see; the model the live session is running, when
-the pick cannot serve the frame at all; a model pinned from the desktop pane (`vision_model.json`
-in the plugin's state directory). A route that answers `400/401/403/404/405/422` — or cannot be
-reached — is set aside for five minutes and tried no more, so a setting you fix recovers by itself.
-When nothing on the ladder can see, the pane names the model that blocks you, the setting at fault
-and how to resume. An empty pin restores automatic routing.
+frames go there even when the session model can see; otherwise a model pinned from the desktop pane
+(`vision_model.json` in the plugin's state directory), unless Hermes positively reports the session
+model can see; otherwise the model the live session is running. The session model also stays on the
+ladder under an aux pick or a pin, so a pick that stops working costs one frame rather than the
+feature. A route that answers `400/401/403/404/405/422` — or cannot be reached — is set aside for
+five minutes and tried no more, so a setting you fix recovers by itself. When nothing on the ladder
+can see, the pane names the model that blocks you, the setting at fault and how to resume. An empty
+pin restores automatic routing.
+
+**What counts as "cannot see".** Only a refusal that names image input, or a reply that admits it
+could not see the frame ("I can't see the contents of your screen") is a capability verdict. A
+missing model, a model that is not served on that endpoint, an image-*generation* model, an
+embedding endpoint, a spent context window or a rejected key are route problems: the ladder moves
+on and reports them as what they are. Conflating the two is what told users their working model was
+blind.
+
+**Observed capability.** An OpenAI-compatible relay renames models per key, so neither
+`config.yaml` nor models.dev can say whether `cmd/…-vision-exp` can see — both resolve to *unknown*,
+which the pane never renders as "cannot see". A frame this plugin described, or an explicit refusal,
+is first-hand evidence and outranks the catalog: it is remembered in `observed_caps.json`, leads the
+pane's candidate list, and keeps a model already watched failing out of it.
 
 ## Usage
 

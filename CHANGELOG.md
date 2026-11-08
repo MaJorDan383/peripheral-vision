@@ -3,6 +3,54 @@
 All notable changes to this plugin. Nothing before the first public release was published, so
 `1.0.0` covers the whole plugin as shipped.
 
+## [1.5.2] - 2026-11-08
+
+### Fixed
+- **A route problem is no longer reported as "this model cannot see".** `_rejects_images` treated
+  any error body containing "image", "vision" or "media" as a capability verdict. An unavailable
+  model id that happens to contain "vision", an image-GENERATION model rejected on the chat path,
+  and an embedding endpoint all made the pane announce that the user's working model was blind and
+  offer to replace it. A refusal now has to name the payload's modality, and the bodies that
+  explain a route failure (missing model, wrong catalogue, no key, out of context, wrong endpoint)
+  are classified as exactly that.
+- **The session model is found by the id the desktop actually sends.** `_live_session_model` and
+  `_live_session_endpoint` did `_sessions.get(session_id)`, but the desktop pane sends the STORED
+  `local-…` id while `_sessions` is keyed by a short per-process runtime id and keeps the stored id
+  in `session_key`. Every lookup missed and resolution fell back to the `config.yaml` default: the
+  pane named a model the user was not talking to, and a chat on a seeing model reported none. All
+  three identities (runtime id, stored key, the agent's own `session_id`) now resolve, and a
+  session whose agent is not built yet answers from its `model_override`.
+- **A pinned model is no longer inert for relay models.** The pin only applied when the active
+  model was positively `False`, and a relay alias the catalogue has never heard of resolves to
+  `None` — so the pin was ignored in exactly the case it exists for. Unknown no longer outranks an
+  explicit pick; a model Hermes says CAN see still does. The session model also stays on the ladder
+  under a pin, so a retired alias no longer takes a working session model down with it.
+- **A reasoning model that spends its budget thinking is no longer "returned no text".** The
+  description call asked for 400 tokens; behind a relay a vision slug can be a reasoning model
+  whose think block costs that much on its own, so the reply arrived as `finish_reason: "length"`
+  with empty `content`. The first attempt keeps the modest cap and a starved one is retried at
+  `PV_VISION_MAX_TOKENS` (default 1200).
+- **A polite refusal in a 200 OK is no longer recorded as proof of vision.** A text-only model
+  behind a relay receives the image, cannot see it, and answers "I'm sorry, but I can't see the
+  contents of your screen". Status and `finish_reason` are clean, so only the wording distinguishes
+  it — and recording that as evidence ranked a blind model first in the pane's list.
+
+### Added
+- **Observed capability, which the catalog cannot supply for a relay.** A described frame and an
+  explicit image refusal are first-hand evidence about a model whose aliases models.dev does not
+  list. They are remembered (`cache/peripheral-vision/observed_caps.json`), outrank an unknown
+  catalogue verdict, lead the candidate list ("described a frame") and keep a model already
+  watched failing out of it.
+
+### Changed
+- **`PV_VISION_MAX_TOKENS`** sets the completion budget for a description (default `1200`).
+
+### Fixed (tests)
+- **The suite is hermetic.** It read the live `$HERMES_HOME/cache/peripheral-vision/` state, so a
+  developer with a pinned vision model saw two pipeline tests fail for a reason that had nothing to
+  do with the code. `pytest_configure` points `HERMES_HOME` at a throwaway directory before
+  collection.
+
 ## [1.5.1] - 2026-10-13
 
 ### Added
