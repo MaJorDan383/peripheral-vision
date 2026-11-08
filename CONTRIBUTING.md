@@ -18,7 +18,7 @@ Two rules keep the plugin installable by anyone:
 
 ## Development setup
 
-Python 3.9+ (CI covers 3.9, 3.11 and 3.13). A Hermes install is **not** needed to develop or
+Python 3.10+ (CI covers 3.10, 3.11 and 3.13). A Hermes install is **not** needed to develop or
 test the plugin.
 
 ```bash

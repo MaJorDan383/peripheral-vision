@@ -3,7 +3,7 @@
 [![tests](https://github.com/MaJorDan383/peripheral-vision/actions/workflows/tests.yml/badge.svg)](https://github.com/MaJorDan383/peripheral-vision/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platforms: Windows stable, Linux preview, macOS preview](https://img.shields.io/badge/platforms-Windows%20stable%20%C2%B7%20Linux%20%2B%20macOS%20preview-9cf.svg)](#platform-support)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![Hermes 0.20.1+](https://img.shields.io/badge/Hermes-%E2%89%A50.20.1-8a63d2.svg)](plugin.yaml)
 
 Peripheral Vision is a plugin for [Hermes](https://hermes-agent.nousresearch.com/docs) that keeps a live view of your screen, windows, and cameras, and feeds fresh descriptions to Hermes before each response. It turns your desktop into a persistent context source so Hermes can see what's on your screen, which window is focused, and what your cameras see — without you having to screenshot every time.
@@ -68,7 +68,7 @@ Source, issues and releases: **https://github.com/MaJorDan383/peripheral-vision*
 - **Windows 10/11** (Win32/DWM/DirectShow), **Linux** or **macOS** (see
   [Platform support](#platform-support)). See [docs/cross-platform-capture.md](docs/cross-platform-capture.md) for the exact per-session
   feature matrix.
-- Python 3.9+
+- Python 3.10+
 - Hermes **0.20.1 or newer** (declared as `requires_hermes` in `plugin.yaml`). 0.20.1 is the
   oldest host that has everything the plugin calls — `ctx.on_unload` and the `pre_llm_call`
   hook both landed in it. Hosts before 0.21.2 ignore the declaration entirely (they warn, they
@@ -351,7 +351,7 @@ ruff check .                            # the lint gate CI runs
 ```
 
 CI (`.github/workflows/tests.yml`) runs those same two commands: the test suite on Linux with
-Python 3.9/3.11/3.13 and on Windows with 3.11, plus the ruff lint job. See
+Python 3.10/3.11/3.13 and on Windows with 3.11, plus the ruff lint job. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the file layout, the test seams, and the two scope rules
 (plugin-only, dependency-light).
 

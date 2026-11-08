@@ -5,6 +5,15 @@ All notable changes to this plugin. Nothing before the first public release was 
 
 ## [1.5.2] - 2026-11-08
 
+### Changed
+- **Python floor is now 3.10** (`requires-python`). GitHub's `ubuntu-latest` runner image moved to
+  Ubuntu 26 in October 2026, which carries no Python 3.9 runtime: the 3.9 CI leg could not even
+  install an interpreter, so it has been failing before the suite started. 3.10 is the oldest
+  version that image still provides, and the suite passes on 3.10, 3.11 and 3.13. `uv.lock` was
+  regenerated: its 3.9 markers collapse, it drops a `pipewire-capture` entry nothing imports
+  (`capture_pipewire.py` shells out to `gst-launch-1.0`), and it picks up the declared
+  `pyobjc-framework-Quartz` and `ruff` that the stale lock never recorded.
+
 ### Fixed
 - **A route problem is no longer reported as "this model cannot see".** `_rejects_images` treated
   any error body containing "image", "vision" or "media" as a capability verdict. An unavailable
