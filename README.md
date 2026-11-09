@@ -79,12 +79,12 @@ Source, issues and releases: **https://github.com/MaJorDan383/peripheral-vision*
   PyGObject (`python3-gi`) turn on the PipeWire ScreenCast tier — see
   [Faster Wayland capture](#faster-wayland-capture-optional). Without them, Wayland capture
   falls back to the one-shot portal screenshot and nothing else changes.
-- Python packages `opencv-python-headless` (`>=4.5,<6`), `Pillow` (`>=10.0,<13`) and `openai`
+- Python packages `opencv-python-headless` (`>=4.5,<6`), `Pillow` (`>=10.0,<14`) and `openai`
   (`>=1.0.0,<3`) — declared in `pyproject.toml` (`[project].dependencies`), the file Hermes reads
   for plugins. Hermes installs them when you install or enable the plugin, resolved together with
   Hermes's own dependency ranges (a combination that cannot resolve is refused up front), and
   re-applies them after `hermes update`. To install them yourself instead:
-  `pip install "opencv-python-headless>=4.5,<6" "Pillow>=10.0,<13" "openai>=1.0.0,<3"`
+  `pip install "opencv-python-headless>=4.5,<6" "Pillow>=10.0,<14" "openai>=1.0.0,<3"`
 
 ### Faster Wayland capture (optional)
 

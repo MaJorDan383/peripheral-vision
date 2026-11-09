@@ -524,7 +524,7 @@ wheels = [
 
 [[package]]
 name = "peripheral-vision"
-version = "1.5.2"
+version = "1.5.3"
 source = { editable = "." }
 dependencies = [
     { name = "openai" },
@@ -543,7 +543,7 @@ dev = [
 requires-dist = [
     { name = "openai", specifier = ">=1.0.0,<3" },
     { name = "opencv-python-headless", specifier = ">=4.5,<6" },
-    { name = "pillow", specifier = ">=10.0,<13" },
+    { name = "pillow", specifier = ">=10.0,<14" },
     { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'", specifier = ">=9.0,<12" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },

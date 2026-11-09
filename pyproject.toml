@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "peripheral-vision"
-version = "1.5.2"
+version = "1.5.3"
 description = "Peripheral vision for Hermes: watch a display, window, or camera - changed frames are described and injected into the turn"
 readme = "README.md"
 license = {text = "MIT"}
@@ -32,7 +32,7 @@ classifiers = [
 # release a new major.
 dependencies = [
     "opencv-python-headless>=4.5,<6",
-    "Pillow>=10.0,<13",
+    "Pillow>=10.0,<14",
     "openai>=1.0.0,<3",
     # Window and display capture on macOS is CoreGraphics. The platform marker keeps it off
     # every other install (pyobjc cannot build off macOS) and Hermes' resolver hands it to uv,

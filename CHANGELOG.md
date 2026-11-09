@@ -3,6 +3,18 @@
 All notable changes to this plugin. Nothing before the first public release was published, so
 `1.0.0` covers the whole plugin as shipped.
 
+## [1.5.3] - 2026-11-09
+
+### Changed
+- **Pillow upper bound is now `<14`** (`Pillow>=10.0,<14`), so the plugin installs on a host whose
+  core pins `Pillow==13.0.0` (Hermes does exactly that on Python 3.14). The old `<13` cap
+  overlapped nothing: Hermes' resolver reported the declaration as unmet on every plugin
+  discovery, and `hermes pm repair` could not satisfy both ranges at once. Verified against
+  13.0.0 before widening — `Image.Resampling` is reached through the existing
+  `getattr(getattr(Image, "Resampling", Image), ...)` fallback, and resize, `ImageChops` +
+  `ImageStat` similarity, `reduce()`, PNG round-trip and `ImageGrab.grab()` all pass on 13.0.0.
+  `uv.lock` regenerated.
+
 ## [1.5.2] - 2026-11-08
 
 ### Changed
