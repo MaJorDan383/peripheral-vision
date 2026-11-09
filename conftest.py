@@ -62,9 +62,9 @@ def pytest_configure(config) -> None:  # noqa: ANN001 - pytest's own hook shape
 
     The backend resolves ``STATE_DIR`` (and every ``*_PATH`` derived from it) at IMPORT time
     from ``$HERMES_HOME/cache/peripheral-vision``. On a machine that actually runs this plugin
-    those files exist, so a suite that read them inherited the developer's own pin and status —
-    a pinned ``om/auto/best-vision`` sent ``_describe`` to a route with no endpoint in the test
-    process and two pipeline tests failed for a reason that had nothing to do with the code.
+    those files exist, so a suite that read them inherited the developer's own state and status —
+    a remembered route sent ``_describe`` to an endpoint that does not exist in the test process
+    and two pipeline tests failed for a reason that had nothing to do with the code.
     ``pytest_configure`` runs before collection, so the env var is set before any test module
     imports ``plugin_api``. Hermetic, like the rest of the suite: no config, no keys, no files.
     """

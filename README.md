@@ -13,10 +13,10 @@ Peripheral Vision is a plugin for [Hermes](https://hermes-agent.nousresearch.com
 - **Display capture** — grabs whole displays: a GDI screen grab on Windows, `import`/`grim` or the desktop portal on Linux
 - **Window capture** — captures a single application window's *own* pixels: PrintWindow, falling back to a DWM thumbnail (the same path that serves a minimized window's last frame), and only screen-grabbing a window that is actually on top of its own area
 - **Camera capture** — enumerates cameras and grabs frames (DirectShow on Windows, V4L2 on Linux); a camera's row states the mode a watch negotiates — the largest its driver offers — which is the size its frames come back at
-- **Vision routing** — sends frames to your auxiliary vision model when one is picked in
-  Hermes' own settings, otherwise to the model the live session is running
+- **Vision routing** — sends frames to the model the live session is running, or to your
+  `auxiliary.vision` model when Hermes reports that one cannot see
 - **Pre-LLM context injection** — adds live descriptions to a turn through the `pre_llm_call` hook, gated by the inject mode (picked in the pane, or `PV_VISION_INJECT_MODE`) so a screen that has not moved does not pay for itself on every turn
-- **Desktop pane** — shows a live preview with monitor/window/camera picker, vision model candidates, and pin support
+- **Desktop pane** — shows a live preview with monitor/window/camera picker and vision model candidates
 - **Manual snapshots** — set "Blink rate" to manual and snapshot on demand: a camera frame, or a drag-cropped screenshot of a display or window, lands in the message input ready to send
 
 ## Platform support
@@ -193,16 +193,18 @@ the Hermes backend (the desktop app inherits your user environment):
 | `PV_CAMERA_MAX_WIDTH` | `0` | Cap the mode a watch negotiates, e.g. `1280`. Frames are downscaled for the model's intake anyway, so the biggest mode can cost camera time for nothing — unset or `0` keeps the largest mode the driver honours |
 | `PV_CAMERA_PROBE_ALL` | _(unset)_ | Set to `1` to probe every camera again. Probes skip virtual cameras — opening Phone Link's virtual camera pops its stream window — so those rows carry their remembered size until picked, and the picker lists them only when **Show virtual cameras** is ticked |
 
-Choosing the vision model is **not** an environment variable. Frames go to whatever can read them,
-in this order: the `auxiliary.vision` model picked in Hermes' own settings (Settings → Models) —
-frames go there even when the session model can see; otherwise a model pinned from the desktop pane
-(`vision_model.json` in the plugin's state directory), unless Hermes positively reports the session
-model can see; otherwise the model the live session is running. The session model also stays on the
-ladder under an aux pick or a pin, so a pick that stops working costs one frame rather than the
-feature. A route that answers `400/401/403/404/405/422` — or cannot be reached — is set aside for
-five minutes and tried no more, so a setting you fix recovers by itself. When nothing on the ladder
-can see, the pane names the model that blocks you, the setting at fault and how to resume. An empty
-pin restores automatic routing.
+Choosing the vision model is **not** an environment variable, and the plugin does not keep a
+vision model of its own. Frames go to the model Hermes itself would use for an image, in this
+order: the model the live session is running, unless Hermes reports that it cannot see; then the
+`auxiliary.vision` model picked in Hermes' own settings (Settings → Models), which is the same
+fallback Hermes applies to image input. An *unknown* verdict is not "cannot see": a relay alias
+the catalog has never heard of is tried, and the refusal (or the successful description) is
+recorded as this plugin's own evidence. The session model also stays on the ladder under an aux
+pick, so a pick that stops working costs one frame rather than the feature. A route that answers
+`400/401/403/404/405/422` — or cannot be reached — is set aside for five minutes and tried no
+more, so a setting you fix recovers by itself. When nothing on the ladder can see, the pane names
+the model that blocks you, the setting at fault and how to resume. Versions before 1.6.0 could
+pin a model from the pane (`vision_model.json`); that file is ignored and swept on the next watch.
 
 **What counts as "cannot see".** Only a refusal that names image input, or a reply that admits it
 could not see the frame ("I can't see the contents of your screen") is a capability verdict. A
@@ -225,11 +227,10 @@ choose a display, window, or camera in the desktop pane. The pane shows:
 1. **Monitor picker** — click a monitor to preview its frame
 2. **Window picker** — select an application window to capture
 3. **Camera picker** — switch between connected cameras; software cameras (a phone's virtual camera, headset feeds, broadcast filters) stay hidden behind a **Show virtual cameras** tick in that list
-4. **Vision candidates** — model suggestions based on intake size
-5. **Pin button** — lock a specific vision model for the session
-6. **Inject picker** ("Rides your turns") — when fresh readings are shared; see [Injection modes](#injection-modes)
-7. **Blink rate** — how often the watch checks for changes; on **manual** it also shows the **Snapshot** buttons beside its picker on the same line; see [Manual snapshots](#manual-snapshots)
-8. **Status** — live status of the capture engine, frame count, source info
+4. **Vision candidates** — read-only list of models in your config that can see, shown when the session model cannot
+5. **Inject picker** ("Rides your turns") — when fresh readings are shared; see [Injection modes](#injection-modes)
+6. **Blink rate** — how often the watch checks for changes; on **manual** it also shows the **Snapshot** buttons beside its picker on the same line; see [Manual snapshots](#manual-snapshots)
+7. **Status** — live status of the capture engine, frame count, source info
 
 Once a source is selected, descriptions are injected into Hermes context before a response,
 giving the assistant a live view of your screen. How often is yours to decide:
@@ -309,7 +310,7 @@ This plugin captures screen content and enumerates window titles. Key facts:
   device is released on stop so its LED does not stay lit.
 - **Descriptions persist on disk** — `log.jsonl` keeps recent descriptions in the plugin's state
   directory, `$HERMES_HOME/cache/peripheral-vision/` (default `~/.hermes/cache/peripheral-vision/`,
-  where `status.json`, `vision_model.json`, `inject_mode` and `stop_request` also live). Delete `log.jsonl` to
+  where `status.json`, `inject_mode` and `stop_request` also live). Delete `log.jsonl` to
   clear that history.
 - **An injected description also becomes part of the session transcript.** The block rides the
   turn's user message, and the host stores the exact bytes sent to the model in the session
@@ -322,7 +323,7 @@ This plugin captures screen content and enumerates window titles. Key facts:
   and stopping the watch ends it immediately.
 - **Every described frame is a model call** — billed and rate-limited like any other call on
   that model. A busy screen at a short interval can mean hundreds of calls an hour; raise the
-  interval or pin a cheaper vision model if that matters to you.
+  interval, or set a cheaper `auxiliary.vision` model in Settings → Models, if that matters to you.
 - **A watching turn can cost more tokens.** While the watch is running and the newest
   description is under 90 seconds old, up to ~1200 characters are eligible for injection — and
   with the default `on_mention` mode that happens only on turns that point at the screen.

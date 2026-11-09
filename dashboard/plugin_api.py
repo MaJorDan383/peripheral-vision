@@ -111,12 +111,12 @@ DEFAULT_INJECT_MODE = "on_mention"
 LOG_KEEP = 400  # ring buffer size for descriptions
 
 # ── Vision: frames go to whatever model Hermes is running ──────────────────
-# There is no fixed vision endpoint here. Each changed frame is described by the
-# model Hermes is CURRENTLY set to (config.yaml model.provider/model.default).
-# When that model cannot accept images the loop stops uploading, records why,
-# and the pane prompts for a vision-capable model — it never silently hands the
-# screen to a different provider.
-OVERRIDE_PATH = STATE_DIR / "vision_model.json"
+# There is no fixed vision endpoint and no plugin-level pin here. Each changed
+# frame is described by the model Hermes is CURRENTLY set to (the live session's
+# pick, else config.yaml model.provider/model.default); only when Hermes says that
+# model cannot see does the describe route fall back to the ``auxiliary.vision``
+# model configured in Hermes' own settings — the same rule Hermes applies to
+# image input. One place configures vision, so the pane cannot disagree with it.
 # What this plugin has itself observed about a model's eyes: a route that described a frame can
 # see, one that refused image input cannot. Relays rename models per key and the catalog cannot
 # know those aliases, so a verdict learned from a real call is the only honest answer available
@@ -611,7 +611,7 @@ class _NeedsVisionModel(RuntimeError):
         super().__init__(
             f"Live descriptions are paused: {target} cannot process images, so no frame can be "
             f"described. Capture keeps running — switch this chat to a vision-capable model, or "
-            f"pin one for descriptions only." + (f" Reason: {reason}" if reason else "")
+            f"set a vision model under Settings → Models → auxiliary vision." + (f" Reason: {reason}" if reason else "")
         )
 
 
@@ -844,7 +844,7 @@ def _live_session_endpoint(session_id: str, provider: str) -> tuple[str, str]:
 
         info = gw._session_info(agent, session)
         if str(info.get("provider") or "").strip() != provider:
-            return ("", "")  # pinned model on another provider — resolve it independently
+            return ("", "")  # aux model on another provider — resolve it independently
         return (
             str(getattr(agent, "base_url", "") or "").strip(),
             str(getattr(agent, "api_key", "") or "").strip(),
@@ -906,28 +906,17 @@ def _endpoint(cfg: dict[str, Any], provider: str, session_id: str = "") -> tuple
     return base_url, key
 
 
-def _pin() -> dict[str, str]:
-    """The user's pinned vision model, or {} when descriptions use the active model."""
-    try:
-        data = json.loads(OVERRIDE_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {"provider": str(data.get("provider") or ""), "model": str(data.get("model") or "")}
+def _drop_legacy_pin() -> None:
+    """Delete a ``vision_model.json`` left behind by a version that still pinned a model.
 
-
-def _save_pin(provider: str, model: str) -> dict[str, str]:
-    """Pin ``model`` for descriptions; empty model clears the pin."""
-    if model:
-        payload = {"provider": provider, "model": model}
-        _write_json(OVERRIDE_PATH, payload)
-        return payload
+    Routing ignores the file now, so leaving it would only mislead: a stale pin on disk plus a
+    pane that no longer offers one is exactly the sort of ghost setting users keep believing in.
+    Best-effort — a read-only state dir must not break resolution.
+    """
     try:
-        OVERRIDE_PATH.unlink()
+        (STATE_DIR / "vision_model.json").unlink()
     except OSError:
         pass
-    return {}
 
 
 def _normalize_inject_mode(raw: str) -> str:
@@ -1023,18 +1012,17 @@ def _aux_vision_target(cfg: dict[str, Any]) -> dict[str, str]:
 
 
 def _route(session_id: str = "") -> dict[str, Any]:
-    """Resolve the model that describes frames.
+    """Resolve the model that describes frames — Hermes' own rule, not a plugin pin.
 
     Precedence:
-    1. an explicit ``auxiliary.vision`` pick in Hermes' config — the user named the model
-       that does vision work, so frames go there (the same rule Hermes applies to images
-       attached to a turn, even when the session model can see);
-    2. otherwise, a model pinned from the pane, unless Hermes positively says the session
-       model can see — the pin is an explicit "describe with this", so an UNKNOWN verdict
-       must not silently outrank it. That is how a pinned relay model the catalog has never
-       heard of was ignored in favour of a text-only config default;
-    3. otherwise, the model the CURRENT SESSION is running;
-    and the pin always stays in ``fallback_*`` so a runtime refusal can fall back to it.
+    1. the model the CURRENT SESSION is running, whenever Hermes does not positively say it
+       cannot see. Unknown is not evidence: a relay alias the catalog has never heard of is
+       exactly the case where trying the session model is right, and a refusal is recorded as
+       a verdict, so the ladder settles the question on the first frame instead of guessing;
+    2. the explicit ``auxiliary.vision`` pick in Hermes' config, when the session model is
+       text-only or no session/config model is known at all. That is the same fallback Hermes
+       applies to image input, and it is the only place vision is configured for this plugin:
+       the pane no longer pins a model of its own, so the two surfaces cannot disagree.
     """
     sid = session_id or str(_WATCH_SESSION.get("id") or "")
     cfg = _hermes_cfg()
@@ -1045,21 +1033,18 @@ def _route(session_id: str = "") -> dict[str, Any]:
         else None
     )
     aux = _aux_vision_target(cfg)
-    pinned = _pin()
-    if aux:
-        # The user picked a vision model in Hermes' own settings: descriptions go there.
+    # An aux block without a model names nothing this plugin can call, so it is not a fallback.
+    use_aux = bool(aux.get("model")) and (active_caps is False or not active_model)
+    if use_aux:
+        # The session model cannot see (or there is none): the configured aux backend describes.
         provider = aux["provider"] or active_provider
         model = aux["model"] or active_model
         source = "auxiliary"
         base_url = aux["base_url"] or _endpoint(cfg, provider, sid)[0]
     else:
-        # A pin is the user's explicit choice for descriptions. Only a model Hermes says CAN
-        # see outranks it — "unknown" is not evidence, and treating it as "cannot see" made
-        # the pin inert exactly where it is needed (a relay model the catalog does not list).
-        use_pin = bool(pinned.get("model")) and active_caps is not True
-        provider = pinned.get("provider") if use_pin else active_provider
-        model = pinned.get("model") if use_pin else active_model
-        source = "pinned" if use_pin else active_source
+        provider = active_provider
+        model = active_model
+        source = active_source
         base_url = _endpoint(cfg, provider, sid)[0]
     return {
         "provider": provider,
@@ -1073,26 +1058,7 @@ def _route(session_id: str = "") -> dict[str, Any]:
         "supports_vision": (
             _specified_vision(cfg, provider, model) if provider and model else None
         ),
-        "fallback_provider": pinned.get("provider", ""),
-        "fallback_model": pinned.get("model", ""),
         "base_url": base_url,
-    }
-
-
-def _pin_route() -> Optional[dict[str, Any]]:
-    """Route dict for the pinned model, or None when nothing is pinned."""
-    pinned = _pin()
-    pin_model = pinned.get("model") or ""
-    if not pin_model:
-        return None
-    cfg = _hermes_cfg()
-    provider = pinned.get("provider") or _active_model(cfg, str(_WATCH_SESSION.get("id") or ""))[0]
-    return {
-        "provider": provider,
-        "model": pin_model,
-        "source": "pinned",
-        "supports_vision": _specified_vision(cfg, provider, pin_model),
-        "base_url": _endpoint(cfg, provider)[0],
     }
 
 
@@ -1102,7 +1068,11 @@ def _looks_multimodal(name: str) -> bool:
 
 
 def _vision_candidates(cfg: dict[str, Any], route: dict[str, Any]) -> list[dict[str, str]]:
-    """Vision-capable models the user can pin, the currently active one first.
+    """Vision-capable models in the user's config, the currently active one first.
+
+    Read-only diagnostics for the pane: it names models Hermes already knows can see, so a
+    session stuck on a text-only model has somewhere concrete to point. Nothing here is
+    selectable — the describe route follows Hermes' own model and its ``auxiliary.vision`` pick.
 
     Candidates come from configured providers: models this plugin has PROVEN can see (their
     frames were described), then models declaring ``supports_vision: true``, then models whose
@@ -1585,27 +1555,59 @@ def _session_route(primary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _describe_ladder() -> list[dict[str, Any]]:
-    """The routes to try, best first: what the user configured, then what can actually see.
+def _aux_route(primary: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The configured ``auxiliary.vision`` model as a describe route, or None when unpicked.
 
-    1. the resolved route — the ``auxiliary.vision`` pick, else the pin, else the session model;
-    2. when that was an aux pick or a pin: the ACTIVE SESSION model. A pick whose key, permission
-       or endpoint is unavailable must not cost the user their descriptions while the model they
-       are already talking to can read a frame perfectly well — and when that model is text-only,
-       it still belongs on the ladder, because it is the thing the error has to name;
-    3. the model pinned in the pane (the existing fallback for a model that cannot see).
+    The rung under a session model that is only *believed* able to see: an unknown catalog verdict
+    is tried first (that is the honest default), but a frame the session model refuses must fall
+    straight through to the model Hermes itself would hand an image to, without pausing the watch.
+    A provider of ``auto`` names no endpoint this plugin can address, so it is not a rung.
+    """
+    cfg = _hermes_cfg()
+    aux = _aux_vision_target(cfg)
+    provider = str(aux.get("provider") or "")
+    model = str(aux.get("model") or "")
+    if not model or provider.lower() in {"", "auto"}:
+        return None
+    sid = str(primary.get("session_id") or "")
+    return {
+        "provider": provider,
+        "model": model,
+        "source": "auxiliary",
+        "active_provider": primary.get("active_provider"),
+        "active_model": primary.get("active_model"),
+        "active_source": primary.get("active_source"),
+        "session_id": sid,
+        "active_supports_vision": primary.get("active_supports_vision"),
+        "supports_vision": _specified_vision(cfg, provider, model),
+        "base_url": aux.get("base_url") or _endpoint(cfg, provider, sid)[0],
+    }
+
+
+def _describe_ladder() -> list[dict[str, Any]]:
+    """The routes to try, best first: what Hermes is running, then what it can see.
+
+    1. the resolved route — the session model, or the ``auxiliary.vision`` pick when that model
+       cannot see;
+    2. the other one of those two. A session model whose capability is unknown leads the ladder
+       (the first frame settles it), and the aux pick sits underneath so a refusal costs one call
+       rather than the feature; when the aux pick leads, the session model sits underneath for the
+       same reason — a pick whose key or endpoint is unavailable must not leave a text-only error
+       where a working model exists.
+
+    There is no third rung: the pane used to pin a model of its own, which only ever existed to
+    outrank the session model. Vision is configured in Hermes' settings, and the fallback is the
+    model Hermes itself falls back to.
     """
     primary = _route()
     routes = [primary]
-    leads_elsewhere = primary.get("source") in {"auxiliary", "pinned"}
-    if leads_elsewhere and primary.get("active_model"):
-        # The session model is the rung under a pick that leads somewhere else. Without it a pin
-        # that stops working (a retired relay alias) took the working session model down with it.
-        routes.append(_session_route(primary))
-    if primary.get("source") != "pinned":
-        pinned = _pin_route()
-        if pinned:
-            routes.append(pinned)
+    if primary.get("source") == "auxiliary":
+        if primary.get("active_model"):
+            routes.append(_session_route(primary))
+    else:
+        aux = _aux_route(primary)
+        if aux:
+            routes.append(aux)
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for route in routes:
@@ -1810,7 +1812,6 @@ class _Engine:
                 "session_id": route.get("session_id"),
                 "active_supports_vision": route.get("active_supports_vision"),
                 "supports_vision": vision_route.get("supports_vision"),
-                "fallback_model": route.get("fallback_model"),
                 "needs_vision_model": bool(self.needs_vision),
                 "detail": self.vision_error,
             },
@@ -1834,6 +1835,7 @@ class _Engine:
         # session expired on its next frame). Backends without the feature: no-op.
         _snap_reset()
         self.stop()
+        _drop_legacy_pin()  # a pin file from an older version is dead weight: routing has no pin
         _WATCH_SESSION["id"] = str(session_id or "")
         route = _route()
         _append_log(
@@ -2685,21 +2687,6 @@ async def get_vision() -> dict[str, Any]:
         "detail": ENGINE.vision_error,
         "candidates": _vision_candidates(cfg, route),
     }
-
-
-@router.post("/vision")
-async def post_vision(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
-    """Pin the model used for descriptions; an empty ``model`` clears the pin."""
-    provider = str(payload.get("provider") or "").strip()
-    model = str(payload.get("model") or "").strip()
-    if model and not provider:
-        provider = _active_model(_hermes_cfg(), str(_WATCH_SESSION.get("id") or ""))[0]
-    _save_pin(provider if model else "", model)
-    if model:
-        ENGINE.needs_vision = False
-        ENGINE.vision_error = ""
-        ENGINE.last_error = ""
-    return {"ok": True, "vision": await get_vision()}
 
 
 @router.post("/start")

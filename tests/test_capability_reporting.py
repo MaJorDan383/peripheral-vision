@@ -9,8 +9,9 @@ Three defects made the pane claim a working model could not see:
 2. The session model was read with ``_sessions.get(desktop_session_id)``, but ``_sessions`` is
    keyed by a short runtime id and keeps the desktop's stored id in ``session_key``. The lookup
    missed, so every resolution fell back to the config default.
-3. A pane pin only applied when the active model was positively ``False``. Relay models resolve
-   to ``None`` (unknown), so the pin was inert exactly where it was needed.
+3. A pane pin used to outrank the session model, so the route the user configured in the pane
+   could disagree with the model they were talking to. The pin is gone: the describe route is
+   the session model unless Hermes says it cannot see, and then the ``auxiliary.vision`` pick.
 
 These tests pin the corrected contract. Live edges are stubbed; no config, keys or network.
 """
@@ -109,7 +110,6 @@ def test_a_refused_frame_does_not_pause_the_watch_as_a_capability_failure(
         return "a described frame"
 
     monkeypatch.setattr(cv, "_route", lambda session_id="": _route(model="gone-vision-model"))
-    monkeypatch.setattr(cv, "_pin_route", lambda: None)
     monkeypatch.setattr(cv, "_endpoint", lambda cfg, provider, sid="": ("http://stub/v1", "k"))
     monkeypatch.setattr(cv, "_append_log", lambda entry: None)
     monkeypatch.setattr(cv, "_ROUTE_DEAD", {})
@@ -225,54 +225,88 @@ def _hermetic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cv, "_append_log", lambda entry: None)
     monkeypatch.setattr(cv, "_ROUTE_DEAD", {})
     monkeypatch.setattr(cv, "_ROUTE_WARNED", set())
-    monkeypatch.setattr(cv, "OVERRIDE_PATH", tmp_path / "vision_model.json")
     monkeypatch.setattr(cv, "OBSERVED_CAPS_PATH", tmp_path / "observed_caps.json")
     monkeypatch.setattr(cv, "_OBSERVED_CAPS", {})
     monkeypatch.setattr(cv, "_CAP_CACHE", {})
     monkeypatch.setattr(cv, "_WATCH_SESSION", {"id": ""})
 
 
-def test_a_pin_applies_when_the_active_verdict_is_merely_unknown(
+def test_an_unknown_verdict_does_not_detour_to_the_aux_pick(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The regression: ``active_caps is False`` made the pin inert for every relay model."""
-    monkeypatch.setattr(cv, "_active_model", lambda cfg, sid="": ("commandcode", "text-only", "config"))
+    """The relay case: a model the catalog cannot classify is tried, not routed around."""
+    monkeypatch.setattr(cv, "_active_model", lambda cfg, sid="": ("commandcode", "relay-alias", "config"))
     monkeypatch.setattr(cv, "_specified_vision", lambda cfg, p, m: None)  # unknown, not False
-    monkeypatch.setattr(cv, "_aux_vision_target", lambda cfg: {})
-    monkeypatch.setattr(cv, "_pin", lambda: {"provider": "om", "model": "pinned-vision"})
+    monkeypatch.setattr(
+        cv,
+        "_aux_vision_target",
+        lambda cfg: {"provider": "om", "model": "aux-vision", "base_url": "http://om/v1"},
+    )
 
     route = cv._route()
-    assert (route["provider"], route["model"]) == ("om", "pinned-vision")
-    assert route["source"] == "pinned"
+    assert (route["provider"], route["model"]) == ("commandcode", "relay-alias")
+    assert route["source"] == "config"
 
 
-def test_a_known_seeing_session_model_outranks_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_seeing_session_model_ignores_the_aux_pick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One place configures vision: a model that can see describes its own frames."""
     monkeypatch.setattr(cv, "_active_model", lambda cfg, sid="": ("openai", "gpt-5", "session"))
     monkeypatch.setattr(cv, "_specified_vision", lambda cfg, p, m: True)
-    monkeypatch.setattr(cv, "_aux_vision_target", lambda cfg: {})
-    monkeypatch.setattr(cv, "_pin", lambda: {"provider": "om", "model": "pinned-vision"})
+    monkeypatch.setattr(
+        cv,
+        "_aux_vision_target",
+        lambda cfg: {"provider": "om", "model": "aux-vision", "base_url": "http://om/v1"},
+    )
 
     route = cv._route()
     assert (route["provider"], route["model"]) == ("openai", "gpt-5")
-    assert route["fallback_model"] == "pinned-vision"
+    assert route["source"] == "session"
+    assert "fallback_model" not in route, "the pane pin is gone from the payload"
 
 
-def test_the_pin_leads_the_ladder_and_the_session_stays_under_it(
+def test_the_aux_pick_leads_the_ladder_and_the_session_stays_under_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pin that stops working must not take the working session model down with it."""
+    """A pick that stops working must not take the session model down with it."""
     monkeypatch.setattr(cv, "_route", lambda session_id="": {
-        **_route(model="pinned-vision", provider="om"),
-        "source": "pinned",
+        **_route(model="aux-vision", provider="om"),
+        "source": "auxiliary",
         "active_model": "session-model",
         "active_provider": "commandcode",
     })
-    monkeypatch.setattr(cv, "_pin_route", lambda: None)
 
     ladder = cv._describe_ladder()
     assert [(r["provider"], r["model"]) for r in ladder] == [
-        ("om", "pinned-vision"),
+        ("om", "aux-vision"),
         ("commandcode", "session-model"),
+    ]
+
+
+def test_a_session_route_has_no_second_rung_without_an_aux_pick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No aux pick configured (the default placeholder is not one): exactly one rung."""
+    monkeypatch.setattr(cv, "_route", lambda session_id="": _route(model="session-model"))
+
+    ladder = cv._describe_ladder()
+    assert [(r["provider"], r["model"]) for r in ladder] == [("commandcode", "session-model")]
+
+
+def test_a_session_route_gains_the_aux_pick_as_its_second_rung(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown-verdict session model leads, with the pick underneath for a refusal."""
+    monkeypatch.setattr(cv, "_route", lambda session_id="": _route(model="relay-alias"))
+    monkeypatch.setattr(
+        cv,
+        "_aux_vision_target",
+        lambda cfg: {"provider": "om", "model": "aux-vision", "base_url": "http://om/v1"},
+    )
+
+    ladder = cv._describe_ladder()
+    assert [(r["provider"], r["model"], r["source"]) for r in ladder] == [
+        ("commandcode", "relay-alias", "config"),
+        ("om", "aux-vision", "auxiliary"),
     ]
 
 
@@ -299,7 +333,6 @@ def test_a_described_frame_is_recorded_as_capability(
 ) -> None:
     monkeypatch.setattr(cv, "_describe_with_model", lambda png, route: "a described frame")
     monkeypatch.setattr(cv, "_route", lambda session_id="": _route(model="relay-alias", provider="om"))
-    monkeypatch.setattr(cv, "_pin_route", lambda: None)
 
     cv._describe(b"\x89PNG\r\n\x1a\n")
     assert cv._OBSERVED_CAPS[("om", "relay-alias")] is True

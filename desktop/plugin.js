@@ -397,7 +397,6 @@ function PeripheralVisionPane({ ctx }) {
   const [intervalPick, setIntervalPick] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [pinChoice, setPinChoice] = useState('')
   // The inject-mode pick: optimistic while the POST is in flight, then /status is the
   // authority (the same value the agent half's hook reads on the next turn).
   const [injectPick, setInjectPick] = useState('')
@@ -756,42 +755,6 @@ function PeripheralVisionPane({ ctx }) {
     snapDragRef.current = null
   }, [])
 
-  const usePinnedModel = useCallback(async () => {
-    if (!pinChoice) {
-      return
-    }
-    const separator = pinChoice.indexOf('::')
-    const provider = separator >= 0 ? pinChoice.slice(0, separator) : ''
-    const model = separator >= 0 ? pinChoice.slice(separator + 2) : pinChoice
-    setBusy(true)
-    setError('')
-    try {
-      await ctx.rest('/vision', { method: 'POST', body: { provider, model } })
-      host.notify({ kind: 'info', message: `Peripheral Vision → ${model}` })
-      await queryClient.invalidateQueries({ queryKey: [ID, 'vision'] })
-      await queryClient.invalidateQueries({ queryKey: [ID, 'status'] })
-    } catch (err) {
-      setError(String((err && err.message) || err))
-    } finally {
-      setBusy(false)
-    }
-  }, [ctx, pinChoice, queryClient])
-
-  const followCurrentModel = useCallback(async () => {
-    setBusy(true)
-    setError('')
-    try {
-      await ctx.rest('/vision', { method: 'POST', body: { provider: '', model: '' } })
-      setPinChoice('')
-      await queryClient.invalidateQueries({ queryKey: [ID, 'vision'] })
-      await queryClient.invalidateQueries({ queryKey: [ID, 'status'] })
-    } catch (err) {
-      setError(String((err && err.message) || err))
-    } finally {
-      setBusy(false)
-    }
-  }, [ctx, queryClient])
-
   const recent = data.recent || []
   const shot =
     gateOpen && preview.data && preview.data.ok ? preview.data.data_url : null
@@ -901,13 +864,11 @@ function PeripheralVisionPane({ ctx }) {
               visionRoute.model
                 ? `${visionRoute.provider ? visionRoute.provider + ' · ' : ''}${visionRoute.model}`
                 : 'no model',
-              visionRoute.source === 'pinned'
-                ? ' (pinned)'
-                : visionRoute.source === 'auxiliary'
-                  ? ' (auxiliary vision)'
-                  : visionRoute.active_source === 'session'
-                    ? ' (this session)'
-                    : ' (config default — no live session reported yet)'
+              visionRoute.source === 'auxiliary'
+                ? ' (auxiliary vision — the session model cannot see)'
+                : visionRoute.active_source === 'session'
+                  ? ' (this session)'
+                  : ' (config default — no live session reported yet)'
             ]
           }),
           data.source_label
@@ -926,16 +887,10 @@ function PeripheralVisionPane({ ctx }) {
                 className: 'text-(--ui-text-quaternary)',
                 children: 'nothing watched yet'
               }),
-          visionRoute.source === 'pinned'
+          visionRoute.source === 'auxiliary' && visionRoute.active_model
             ? jsx('span', {
                 className: 'text-(--ui-text-quaternary)',
-                children: 'vision model pinned'
-              })
-            : null,
-          visionRoute.source !== 'pinned' && visionRoute.fallback_model
-            ? jsx('span', {
-                className: 'text-(--ui-text-quaternary)',
-                children: `fallback if it can't see: ${visionRoute.fallback_model}`
+                children: `session model ${visionRoute.active_model} cannot see — using the auxiliary vision model`
               })
             : null,
           needsVisionModel
@@ -952,7 +907,7 @@ function PeripheralVisionPane({ ctx }) {
                   jsx('span', {
                     className: 'text-(--ui-text-quaternary)',
                     children:
-                      "Watching keeps running, but nothing is sent to a model that can't see images. Switch this chat to a vision-capable model, or pick one below to pin it for descriptions only."
+                      "Watching keeps running, but nothing is sent to a model that can't see images. Switch this chat to a vision-capable model, or set one under Settings → Models → auxiliary vision: descriptions follow that model whenever the session model is text-only."
                   }),
                   visionData.detail
                     ? jsx('span', {
@@ -961,50 +916,17 @@ function PeripheralVisionPane({ ctx }) {
                       })
                     : null,
                   visionCandidates.length > 0
-                    ? jsx(Select, {
-                        value: pinChoice,
-                        onValueChange: setPinChoice,
-                        children: jsxs(SelectTrigger, {
-                          className: 'h-6 w-full text-xs',
-                          children: [
-                            jsx(SelectValue, { placeholder: 'choose a vision model' }),
-                            jsx(SelectContent, {
-                              children: visionCandidates.map(option =>
-                                jsx(
-                                  SelectItem,
-                                  {
-                                    value: `${option.provider}::${option.model}`,
-                                    children: option.label
-                                  },
-                                  `${option.provider}::${option.model}`
-                                )
-                              )
-                            })
-                          ]
-                        })
+                    ? jsx('span', {
+                        className: 'text-(--ui-text-quaternary)',
+                        children: `Models that can see: ${visionCandidates
+                          .slice(0, 4)
+                          .map(option => option.label)
+                          .join(', ')}`
                       })
                     : jsx('span', {
                         className: 'text-(--ui-text-quaternary)',
                         children: 'No vision-capable model in your config — add one in Settings → Models, or switch this chat to a model that can see.'
-                      }),
-                  jsxs('div', {
-                    className: 'flex items-center gap-2',
-                    children: [
-                      jsx(Button, {
-                        size: 'sm',
-                        disabled: !pinChoice || busy,
-                        onClick: usePinnedModel,
-                        children: 'Use this model'
-                      }),
-                      jsx(Button, {
-                        size: 'sm',
-                        variant: 'ghost',
-                        disabled: busy,
-                        onClick: followCurrentModel,
-                        children: 'Follow current model'
                       })
-                    ]
-                  })
                 ]
               })
             : null

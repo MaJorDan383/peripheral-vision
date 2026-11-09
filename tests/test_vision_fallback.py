@@ -43,7 +43,7 @@ def _raise(exc: BaseException) -> NoReturn:
     raise exc
 
 
-def _aux_route(*, session_sees: bool = True, pinned: str = "") -> dict:
+def _aux_route(*, session_sees: bool = True) -> dict:
     return {
         "provider": AUX_PICK[0],
         "model": AUX_PICK[1],
@@ -55,7 +55,6 @@ def _aux_route(*, session_sees: bool = True, pinned: str = "") -> dict:
         "active_supports_vision": session_sees,
         "session_id": "sess-1",
         "supports_vision": None,
-        "fallback_model": pinned,
     }
 
 
@@ -64,7 +63,6 @@ def _no_live_edges(monkeypatch: pytest.MonkeyPatch) -> None:
     """No config, no endpoint lookup, no pin, no log writes, no parked-route carry-over."""
     monkeypatch.setattr(cv, "_hermes_cfg", lambda ttl=5.0: {})
     monkeypatch.setattr(cv, "_endpoint", lambda cfg, provider, sid="": (f"http://{provider}/v1", "key"))
-    monkeypatch.setattr(cv, "_pin_route", lambda: None)
     monkeypatch.setattr(cv, "_append_log", lambda entry: None)
     monkeypatch.setattr(cv, "_recent", lambda n=12: [])
     monkeypatch.setattr(cv, "_ROUTE_DEAD", {})
@@ -158,27 +156,55 @@ def test_a_parked_pick_is_not_retried_on_every_frame(monkeypatch: pytest.MonkeyP
     assert attempts == [AUX_PICK[0], SESSION[0], SESSION[0]]
 
 
-def test_the_pinned_model_is_the_last_rung(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A text-only session model still leaves the pin a chance — unchanged behaviour."""
-    monkeypatch.setattr(cv, "_route", lambda session_id="": _aux_route(session_sees=False))
+def test_an_unknown_session_model_falls_through_to_the_aux_pick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown verdict is tried first, and its refusal costs one call, not the feature."""
     monkeypatch.setattr(
         cv,
-        "_pin_route",
-        lambda: {"provider": "local", "model": "qwen-vl", "source": "pinned", "supports_vision": True},
+        "_route",
+        lambda session_id="": {
+            "provider": SESSION[0],
+            "model": SESSION[1],
+            "source": "session",
+            "base_url": "http://commandcode/v1",
+            "active_provider": SESSION[0],
+            "active_model": SESSION[1],
+            "active_source": "session",
+            "active_supports_vision": None,  # unknown: the catalog never heard of it
+            "session_id": "sess-1",
+            "supports_vision": None,
+        },
+    )
+    monkeypatch.setattr(
+        cv,
+        "_aux_vision_target",
+        lambda cfg: {"provider": AUX_PICK[0], "model": AUX_PICK[1], "base_url": "http://127.0.0.1:20128/v1"},
     )
     called: list[str] = []
 
     def fake(png: bytes, route: dict) -> str:
         del png
         called.append(f"{route['provider']}/{route['model']}")
-        if route["model"] != "qwen-vl":
-            raise _refused()
-        return "A diagram."
+        if route["provider"] == SESSION[0]:
+            raise cv._NeedsVisionModel(SESSION[0], SESSION[1], "supports text input only")
+        return "A browser window."
 
     monkeypatch.setattr(cv, "_describe_with_model", fake)
-    assert cv._describe(FRAME) == "A diagram."
-    assert called == ["om/auto/best-vision", "local/qwen-vl"], "the blind session was attempted"
-    assert cv._LAST_ROUTE is not None and cv._LAST_ROUTE["source"] == "pinned"
+    assert cv._describe(FRAME) == "A browser window."
+    assert called == ["commandcode/deepseek-v4.1-flash-fast", "om/auto/best-vision"]
+    assert cv._LAST_ROUTE is not None and cv._LAST_ROUTE["source"] == "auxiliary"
+
+
+def test_the_ladder_ends_at_the_session_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No third rung: a dead pick and a blind session leave nothing else to try."""
+    monkeypatch.setattr(cv, "_route", lambda session_id="": _aux_route(session_sees=False))
+    monkeypatch.setattr(cv, "_describe_with_model", lambda png, route: _raise(_refused()))
+
+    ladder = cv._describe_ladder()
+    assert [(r["provider"], r["model"]) for r in ladder] == [AUX_PICK, SESSION]
+    with pytest.raises(cv._NeedsVisionModel):
+        cv._describe(FRAME)
 
 
 def test_a_blind_session_with_an_unavailable_pick_explains_both(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3,6 +3,30 @@
 All notable changes to this plugin. Nothing before the first public release was published, so
 `1.0.0` covers the whole plugin as shipped.
 
+## [1.6.0] - 2026-11-09
+
+### Removed
+- **The pane's vision-model pin, and the `POST /vision` route behind it.** The plugin no longer
+  keeps a vision model of its own: descriptions follow the model the live session is running, or
+  the `auxiliary.vision` pick when Hermes reports that model cannot see. One place configures
+  vision, so the pane can no longer disagree with the chat on screen. `_pin`/`_save_pin`/
+  `_pin_route`, `OVERRIDE_PATH`, the `fallback_provider`/`fallback_model` payload fields and the
+  pane's picker ("Use this model" / "Follow current model") are gone with it.
+- **A leftover `vision_model.json` is ignored, then swept.** An upgrading user keeps the file;
+  routing never reads it, and `_drop_legacy_pin()` deletes it when a watch starts so no ghost
+  setting survives in the state directory.
+
+### Changed
+- **A session model that can see now describes its own frames, even when an `auxiliary.vision`
+  pick is configured.** The pick is the fallback for a text-only session model (or for a config
+  with no model at all), not a silent redirect for every frame. An *unknown* verdict keeps the
+  session model too: a relay alias the catalog has never heard of is settled by the first frame,
+  which is recorded as observed capability, rather than being routed around on a guess.
+- **The describe ladder is two rungs at most** — the aux pick, then the session model under it —
+  and the pane says `(auxiliary vision — the session model cannot see)` when the fallback is in
+  play. The blind-session message now points at Settings → Models → auxiliary vision instead of
+  offering a pin, and the `/vision` `candidates` list is read-only diagnostics.
+
 ## [1.5.3] - 2026-11-09
 
 ### Changed
