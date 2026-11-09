@@ -10,11 +10,15 @@ on:
 
 jobs:
   pytest:
+    # `ubuntu-latest` moved to Ubuntu 26 in October 2026, which carries no Python 3.9 runtime:
+    # the floor is now 3.10, the oldest version GitHub still builds that image for (3.11 and
+    # 3.13 remain in the matrix alongside it). Keeping the tests on 3.10 rather than 3.9 is why
+    # this workflow tracks `ubuntu-latest` instead of pinning an image.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11", "3.13"]
+        python-version: ["3.10", "3.11", "3.13"]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
